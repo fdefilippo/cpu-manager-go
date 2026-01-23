@@ -9,7 +9,7 @@ Enterprise-grade dynamic CPU resource management tool using Linux cgroups v2. Au
 
 ## ✨ Features
 
-- **Dynamic CPU limiting** for non-system users (UID 1000-...)
+- **Dynamic CPU limiting** for non-system users (UID >=1000)
 - **Configurable thresholds** for activation and release
 - **Absolute CPU limits** using `cpu.max` cgroup controller
 - **Prometheus metrics** export with comprehensive dashboard
