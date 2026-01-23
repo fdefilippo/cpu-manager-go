@@ -43,3 +43,49 @@ graph TB
     
     style A fill:#e1f5fe
     style J fill:#f3e5f5
+```
+
+## Build RPM package
+make rpm
+### Install
+rpm -ivh ~/rpmbuild/RPMS/\*/cpu-manager-go-\*.rpm
+### Configure
+vi /etc/cpu-manager.conf
+### Start service
+systemctl enable --now cpu-manager
+
+## Prerequisites: Enabling cgroups v2 on Enterprise Linux ≥ 8
+CPU Manager requires cgroups v2 with CPU and cpuset controllers enabled. 
+Here's how to enable them on RHEL/CentOS/Rocky/AlmaLinux ≥ 8:
+```
+# Enable unified cgroup hierarchy
+grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=1"
+
+# Verify the change
+grubby --info=ALL | grep "systemd.unified_cgroup_hierarchy"
+
+# Reboot
+reboot
+
+# After reboot, enable CPU controllers
+echo "+cpu" | sudo tee -a /sys/fs/cgroup/cgroup.subtree_control
+echo "+cpuset" | sudo tee -a /sys/fs/cgroup/cgroup.subtree_control
+```
+
+Persistent via Systemd Service (Recommended)
+Create /etc/systemd/system/cgroup-tweaks.service:
+```
+[Unit]
+Description=Configure cgroup subtree controls
+Before=systemd-user-sessions.service
+Before=cpu-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "+cpu" >> /sys/fs/cgroup/cgroup.subtree_control'
+ExecStart=/bin/sh -c 'echo "+cpuset" >> /sys/fs/cgroup/cgroup.subtree_control'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
