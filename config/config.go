@@ -23,8 +23,6 @@ import (
     "strconv"
     "strings"
     "reflect"
-
-//    "github.com/joho/godotenv" // Per un possibile supporto .env, opzionale
 )
 
 // Config contiene tutti i parametri configurabili dell'applicazione.
@@ -59,6 +57,7 @@ type Config struct {
     // Logging
     LogLevel   string `config:"LOG_LEVEL"`
     LogMaxSize int    `config:"LOG_MAX_SIZE"` // in bytes
+    UseSyslog  bool   `config:"USE_SYSLOG"`
 
     // System
     MinSystemCores int `config:"MIN_SYSTEM_CORES"`
@@ -104,11 +103,12 @@ func DefaultConfig() *Config {
 
         LogLevel:   "INFO",
         LogMaxSize: 10 * 1024 * 1024, // 10MB
+        UseSyslog:  false,
 
         MinSystemCores: 1,
         SystemUIDMin:   1000,
         SystemUIDMax:   pidMax,
-        IgnoreSystemLoad: false,  // Default: considera il load average
+        IgnoreSystemLoad: false,
     }
 }
 
@@ -162,9 +162,6 @@ func loadFromFile(path string, cfg *Config) error {
         // Rimuovi eventuali virgolette
         value = strings.Trim(value, `"'`)
 
-        // Usa una semplice reflection per impostare il campo corrispondente.
-        // In una versione più robusta, potresti usare una map o una libreria.
-        // Questo è un approccio semplificato.
         if err := setConfigField(cfg, key, value); err != nil {
             return fmt.Errorf("setting key %s on line %d: %w", key, i+1, err)
         }
@@ -174,7 +171,6 @@ func loadFromFile(path string, cfg *Config) error {
 
 // loadFromEnvironment sovrascrive i valori con le variabili d'ambiente.
 func loadFromEnvironment(cfg *Config) {
-    // Usa reflection per iterare su tutti i campi
     cfgType := reflect.TypeOf(*cfg)
     cfgValue := reflect.ValueOf(cfg).Elem()
 
@@ -207,7 +203,6 @@ func loadFromEnvironment(cfg *Config) {
                 fieldValue.SetInt(int64(intVal))
             }
         case reflect.Bool:
-            // Gestisci booleani come nella setConfigField
             lowerVal := strings.ToLower(envValue)
             boolVal := false
             switch lowerVal {
@@ -220,9 +215,9 @@ func loadFromEnvironment(cfg *Config) {
         }
     }
 }
+
 // setConfigField imposta il valore di un campo nella struct Config basandosi sul tag `config`.
 func setConfigField(cfg *Config, key, value string) error {
-    // Usa un switch per gestire tutti i campi della configurazione
     switch key {
     // Paths
     case "CGROUP_ROOT":
@@ -270,17 +265,14 @@ func setConfigField(cfg *Config, key, value string) error {
     case "CPU_QUOTA_LIMITED":
         cfg.CPUQuotaLimited = value
 
-    // Prometheus - IMPORTANTE: gestisci i booleani
+    // Prometheus
     case "ENABLE_PROMETHEUS":
-        // Supporta: true, false, 1, 0, yes, no
         switch strings.ToLower(value) {
         case "true", "1", "yes", "on":
             cfg.EnablePrometheus = true
         case "false", "0", "no", "off":
             cfg.EnablePrometheus = false
         default:
-            // Logga warning ma non fallire
-            fmt.Printf("Warning: invalid boolean value for %s: %s, defaulting to false\n", key, value)
             cfg.EnablePrometheus = false
         }
     case "PROMETHEUS_PORT":
@@ -296,6 +288,15 @@ func setConfigField(cfg *Config, key, value string) error {
     case "LOG_MAX_SIZE":
         if i, err := strconv.Atoi(value); err == nil {
             cfg.LogMaxSize = i
+        }
+    case "USE_SYSLOG":
+        switch strings.ToLower(value) {
+        case "true", "1", "yes", "on":
+            cfg.UseSyslog = true
+        case "false", "0", "no", "off":
+            cfg.UseSyslog = false
+        default:
+            cfg.UseSyslog = false
         }
 
     // System
@@ -313,23 +314,21 @@ func setConfigField(cfg *Config, key, value string) error {
         }
     // Load checking
     case "IGNORE_SYSTEM_LOAD":
-        // Supporta: true, false, 1, 0, yes, no
         switch strings.ToLower(value) {
         case "true", "1", "yes", "on":
             cfg.IgnoreSystemLoad = true
         case "false", "0", "no", "off":
             cfg.IgnoreSystemLoad = false
         default:
-            // Default a false
             cfg.IgnoreSystemLoad = false
         }
     default:
-        // Ignora chiavi sconosciute
         return nil
     }
 
     return nil
 }
+
 // validateConfig esegue tutte le validazioni come nello script Bash.
 func validateConfig(cfg *Config) error {
     var errors []string
