@@ -54,28 +54,28 @@ all: clean test lint build
 
 # Build locale per sviluppo
 build: deps
-        @echo "Building $(PROJECT_NAME)..."
-        $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) -o $(PROJECT_NAME)
-        @echo "Build completato: ./$(PROJECT_NAME)"
+	@echo "Building $(PROJECT_NAME)..."
+	$(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) -o $(PROJECT_NAME)
+	@echo "Build completato: ./$(PROJECT_NAME)"
 
 # Build per release (multi-architettura)
 release: deps test lint
-        @echo "Building release binaries for multiple architectures..."
-        @mkdir -p $(BUILD_DIR)
-        @for os in $(OSES); do \
-                for arch in $(ARCHES); do \
-                        echo "Building for $$os/$$arch..."; \
-                        GOOS=$$os GOARCH=$$arch $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) \
-                                -o $(BUILD_DIR)/$(PROJECT_NAME)-$(VERSION)-$$os-$$arch; \
-                done \
-        done
-        @echo "Release binaries disponibili in: $(BUILD_DIR)/"
+	@echo "Building release binaries for multiple architectures..."
+	@mkdir -p $(BUILD_DIR)
+	@for os in $(OSES); do \
+		for arch in $(ARCHES); do \
+			echo "Building for $$os/$$arch..."; \
+			GOOS=$$os GOARCH=$$arch $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) \
+			-o $(BUILD_DIR)/$(PROJECT_NAME)-$(VERSION)-$$os-$$arch; \
+		done \
+	done
+	@echo "Release binaries disponibili in: $(BUILD_DIR)/"
 
 # Build statico (senza dipendenze C)
 static: deps
-        @echo "Building static binary..."
-        CGO_ENABLED=0 $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) -a -installsuffix cgo -o $(PROJECT_NAME)-static
-        @echo "Static binary build completato: ./$(PROJECT_NAME)-static"
+	@echo "Building static binary..."
+	CGO_ENABLED=0 $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) -a -installsuffix cgo -o $(PROJECT_NAME)-static
+	@echo "Static binary build completato: ./$(PROJECT_NAME)-static"
 
 # ============================================================================
 # TEST E QUALITÀ
@@ -83,36 +83,36 @@ static: deps
 
 # Esegui test unitari
 test: deps
-        @echo "Running tests..."
-        $(GO) test -v -cover ./...
+	@echo "Running tests..."
+	$(GO) test -v -cover ./...
 
 # Test con coverage
 test-cover: deps
-        @echo "Running tests with coverage..."
-        $(GO) test -v -coverprofile=coverage.out ./...
-        $(GO) tool cover -html=coverage.out -o coverage.html
-        @echo "Coverage report generato: coverage.html"
+	@echo "Running tests with coverage..."
+	$(GO) test -v -coverprofile=coverage.out ./...
+	$(GO) tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generato: coverage.html"
 
 # Linting del codice
 lint: deps
-        @echo "Running linters..."
-        @if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
-                $(GOLANGCI_LINT) run; \
-        else \
-                echo "golangci-lint non installato, eseguendo go vet..."; \
-                $(GO) vet ./...; \
-        fi
+	@echo "Running linters..."
+	@if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
+		$(GOLANGCI_LINT) run; \
+	else \
+		echo "golangci-lint non installato, eseguendo go vet..."; \
+		$(GO) vet ./...; \
+	fi
 
 # Formatta il codice
 fmt:
-        @echo "Formatting code..."
-        $(GO) fmt ./...
+	@echo "Formatting code..."
+	$(GO) fmt ./...
 
 # Verifica dipendenze
 deps:
-        @echo "Checking/updating dependencies..."
-        $(GO) mod tidy
-        $(GO) mod verify
+	@echo "Checking/updating dependencies..."
+	$(GO) mod tidy
+	$(GO) mod verify
 
 # ============================================================================
 # INSTALLAZIONE
@@ -120,23 +120,23 @@ deps:
 
 # Installa localmente (richiede permessi)
 install: build
-        @echo "Installing $(PROJECT_NAME) to $(BIN_DIR)..."
-        sudo install -m 755 $(PROJECT_NAME) $(BIN_DIR)/
-        sudo install -m 644 config/cpu-manager.conf.example $(CONF_DIR)/cpu-manager.conf
-        sudo install -m 644 packaging/systemd/cpu-manager.service $(SYSTEMD_DIR)/
-        sudo systemctl daemon-reload
-        @echo "Installazione completata!"
-        @echo "Configurazione: $(CONF_DIR)/cpu-manager.conf"
-        @echo "Service: $(SYSTEMD_DIR)/cpu-manager.service"
+	@echo "Installing $(PROJECT_NAME) to $(BIN_DIR)..."
+	sudo install -m 755 $(PROJECT_NAME) $(BIN_DIR)/
+	sudo install -m 644 config/cpu-manager.conf.example $(CONF_DIR)/cpu-manager.conf
+	sudo install -m 644 packaging/systemd/cpu-manager.service $(SYSTEMD_DIR)/
+	sudo systemctl daemon-reload
+	@echo "Installazione completata!"
+	@echo "Configurazione: $(CONF_DIR)/cpu-manager.conf"
+	@echo "Service: $(SYSTEMD_DIR)/cpu-manager.service"
 
 # Disinstalla
 uninstall:
-        @echo "Uninstalling $(PROJECT_NAME)..."
-        sudo rm -f $(BIN_DIR)/$(PROJECT_NAME)
-        sudo rm -f $(CONF_DIR)/cpu-manager.conf
-        sudo rm -f $(SYSTEMD_DIR)/cpu-manager.service
-        sudo systemctl daemon-reload
-        @echo "Disinstallazione completata!"
+	@echo "Uninstalling $(PROJECT_NAME)..."
+	sudo rm -f $(BIN_DIR)/$(PROJECT_NAME)
+	sudo rm -f $(CONF_DIR)/cpu-manager.conf
+	sudo rm -f $(SYSTEMD_DIR)/cpu-manager.service
+	sudo systemctl daemon-reload
+	@echo "Disinstallazione completata!"
 
 # ============================================================================
 # PACCHETTIZZAZIONE RPM
@@ -144,30 +144,33 @@ uninstall:
 
 # Crea struttura RPM
 rpm-dirs:
-        @echo "Creating RPM build directories..."
-        mkdir -p $(RPMBUILD_DIR)/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	@echo "Creating RPM build directories..."
+	mkdir -p $(RPMBUILD_DIR)/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
 # Crea tarball per RPM
 rpm-source: build rpm-dirs
-        @echo "Creating source tarball for RPM..."
-        mkdir -p $(PROJECT_NAME)-$(VERSION)
-        cp -r *.go go.mod go.sum config/ cgroup/ metrics/ state/ logging/ reloader/ \
+	@echo "Creating source tarball for RPM..."
+	mkdir -p $(PROJECT_NAME)-$(VERSION)
+	cp -r *.go go.mod go.sum config/ cgroup/ metrics/ state/ logging/ reloader/ \
                 README.md LICENSE packaging/ docs/ $(PROJECT_NAME)-$(VERSION)/
-        tar czf $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz $(PROJECT_NAME)-$(VERSION)
-        rm -rf $(PROJECT_NAME)-$(VERSION)
-        @echo "Source tarball creato: $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz"
+	mkdir -p $(PROJECT_NAME)-$(VERSION)/packaging/syslog
+	cp packaging/syslog/cpu-manager-go.conf $(PROJECT_NAME)-$(VERSION)/packaging/syslog/
+	cp packaging/syslog/cpu-manager-go $(PROJECT_NAME)-$(VERSION)/packaging/syslog/
+	tar czf $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz $(PROJECT_NAME)-$(VERSION)
+	rm -rf $(PROJECT_NAME)-$(VERSION)
+	@echo "Source tarball creato: $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz"
 
 # Build RPM
 rpm: rpm-source
-        @echo "Building RPM package..."
-        cp packaging/rpm/$(PROJECT_NAME).spec $(RPMBUILD_DIR)/SPECS/
-        rpmbuild -ba $(RPMBUILD_DIR)/SPECS/$(PROJECT_NAME).spec
-        @echo "RPM creato: $(RPMBUILD_DIR)/RPMS/*/$(PROJECT_NAME)-$(VERSION)-$(RELEASE).*.rpm"
+	@echo "Building RPM package..."
+	cp packaging/rpm/$(PROJECT_NAME).spec $(RPMBUILD_DIR)/SPECS/
+	rpmbuild -ba $(RPMBUILD_DIR)/SPECS/$(PROJECT_NAME).spec
+	@echo "RPM creato: $(RPMBUILD_DIR)/RPMS/*/$(PROJECT_NAME)-$(VERSION)-$(RELEASE).*.rpm"
 
 # Install RPM (locale)
 rpm-install: rpm
-        @echo "Installing RPM..."
-        sudo rpm -ivh --force $(RPMBUILD_DIR)/RPMS/*/$(PROJECT_NAME)-$(VERSION)-$(RELEASE).*.rpm
+	@echo "Installing RPM..."
+	sudo rpm -ivh --force $(RPMBUILD_DIR)/RPMS/*/$(PROJECT_NAME)-$(VERSION)-$(RELEASE).*.rpm
 
 # ============================================================================
 # PACCHETTIZZAZIONE DEBIAN
@@ -175,23 +178,23 @@ rpm-install: rpm
 
 # Crea directory per build Debian
 deb-dirs:
-        @echo "Creating Debian build directories..."
-        mkdir -p $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)
+	@echo "Creating Debian build directories..."
+	mkdir -p $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)
 
 # Build binario per Debian (per architettura specifica)
 deb-binary: deps test lint
-        @echo "Building binary for Debian package..."
-        @mkdir -p $(DEB_BUILD_DIR)
-        @for arch in $(ARCHES); do \
+	@echo "Building binary for Debian package..."
+	@mkdir -p $(DEB_BUILD_DIR)
+	@for arch in $(ARCHES); do \
                 echo "Building Debian binary for $$arch..."; \
                 GOOS=linux GOARCH=$$arch $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) \
                         -o $(DEB_BUILD_DIR)/$(PROJECT_NAME)-$$arch; \
-        done
+	done
 
 # Prepara struttura pacchetto Debian
 deb-prepare: deb-dirs deb-binary
-        @echo "Preparing Debian package structure..."
-        @for arch in $(ARCHES); do \
+	@echo "Preparing Debian package structure..."
+	@for arch in $(ARCHES); do \
                 DEB_ARCH=$$(eval echo \$$DEB_ARCH_$$arch); \
                 echo "Preparing package for $$DEB_ARCH..."; \
                 PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
@@ -262,33 +265,33 @@ fi \
 exit 0 \
 EOF \
                 chmod 755 $$PKG_DIR/DEBIAN/postrm; \
-        done
-        @echo "Debian package structure prepared in $(DEB_BUILD_DIR)/"
+	done
+	@echo "Debian package structure prepared in $(DEB_BUILD_DIR)/"
 
 # Build pacchetto Debian
 deb: deb-prepare
-        @echo "Building Debian packages..."
-        @for arch in $(ARCHES); do \
+	@echo "Building Debian packages..."
+	@for arch in $(ARCHES); do \
                 DEB_ARCH=$$(eval echo \$$DEB_ARCH_$$arch); \
                 echo "Building .deb for $$DEB_ARCH..."; \
                 PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
                 dpkg-deb --build $$PKG_DIR $(DEB_BUILD_DIR)/; \
                 mv $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb \
                    $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb; \
-        done
-        @echo "Debian packages created in $(DEB_BUILD_DIR)/"
+	done
+	@echo "Debian packages created in $(DEB_BUILD_DIR)/"
 
 # Installa pacchetto Debian (locale)
 deb-install: deb
-        @echo "Installing Debian package..."
-        @for arch in $(ARCHES); do \
+	@echo "Installing Debian package..."
+	@for arch in $(ARCHES); do \
                 DEB_ARCH=$$(eval echo \$$DEB_ARCH_$$arch); \
                 if [ "$$(dpkg --print-architecture)" = "$$DEB_ARCH" ]; then \
                         echo "Installing package for $$DEB_ARCH..."; \
                         sudo dpkg -i $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb; \
                         break; \
                 fi \
-        done
+	done
 
 # ============================================================================
 # DOCKER
@@ -296,14 +299,14 @@ deb-install: deb
 
 # Build Docker image
 docker-build:
-        @echo "Building Docker image..."
-        docker build -t $(PROJECT_NAME):$(VERSION) -f packaging/docker/Dockerfile .
-        docker tag $(PROJECT_NAME):$(VERSION) $(PROJECT_NAME):latest
+	@echo "Building Docker image..."
+	docker build -t $(PROJECT_NAME):$(VERSION) -f packaging/docker/Dockerfile .
+	docker tag $(PROJECT_NAME):$(VERSION) $(PROJECT_NAME):latest
 
 # Run Docker container
 docker-run:
-        @echo "Running Docker container..."
-        docker run --rm -it \
+	@echo "Running Docker container..."
+	docker run --rm -it \
                 --privileged \
                 -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
                 -v /etc/cpu-manager.conf:/etc/cpu-manager.conf:ro \
@@ -315,11 +318,11 @@ docker-run:
 
 # Pulisci build
 clean:
-        @echo "Cleaning build artifacts..."
-        rm -rf $(PROJECT_NAME) $(PROJECT_NAME)-static
-        rm -rf $(BUILD_DIR) $(DIST_DIR) coverage.out coverage.html
-        rm -rf $(PROJECT_NAME)-$(VERSION)
-        $(GO) clean
+	@echo "Cleaning build artifacts..."
+	rm -rf $(PROJECT_NAME) $(PROJECT_NAME)-static
+	rm -rf $(BUILD_DIR) $(DIST_DIR) coverage.out coverage.html
+	rm -rf $(PROJECT_NAME)-$(VERSION)
+	$(GO) clean
 
 # ============================================================================
 # DOCUMENTAZIONE
@@ -337,52 +340,52 @@ MAN_INSTALL_DIR = /usr/share/man/man8
 
 # Genera directory per man page
 man-dirs:
-        @mkdir -p $(MAN_BUILD_DIR)
+	@mkdir -p $(MAN_BUILD_DIR)
 
 # Genera man page compressa
 man: man-dirs $(MAN_SOURCE)
-        @echo "Generating man page..."
-        @gzip -k -c $(MAN_SOURCE) > $(MAN_GZIPPED)
-        @echo "Man page generated: $(MAN_GZIPPED)"
+	@echo "Generating man page..."
+	@gzip -k -c $(MAN_SOURCE) > $(MAN_GZIPPED)
+	@echo "Man page generated: $(MAN_GZIPPED)"
 
 # Genera HTML dalla man page
 man-html: man-dirs $(MAN_SOURCE)
-        @echo "Generating HTML documentation..."
-        @groff -mandoc -Thtml $(MAN_SOURCE) > $(MAN_HTML)
-        @echo "HTML documentation generated: $(MAN_HTML)"
+	@echo "Generating HTML documentation..."
+	@groff -mandoc -Thtml $(MAN_SOURCE) > $(MAN_HTML)
+	@echo "HTML documentation generated: $(MAN_HTML)"
 
 # Visualizza man page localmente
 view-man: man
-        @echo "Displaying man page..."
-        @gunzip -c $(MAN_GZIPPED) | nroff -man | less -R || \
-         echo "Install 'less' for better viewing, or use: cat $(MAN_SOURCE)"
+	@echo "Displaying man page..."
+	@gunzip -c $(MAN_GZIPPED) | nroff -man | less -R || \
+	echo "Install 'less' for better viewing, or use: cat $(MAN_SOURCE)"
 
 # Installa man page
 install-man: man
-        @echo "Installing man page..."
-        @sudo install -d $(MAN_INSTALL_DIR)
-        @sudo install -m 644 $(MAN_GZIPPED) $(MAN_INSTALL_DIR)/
-        @if command -v mandb >/dev/null 2>&1; then \
+	@echo "Installing man page..."
+	@sudo install -d $(MAN_INSTALL_DIR)
+	@sudo install -m 644 $(MAN_GZIPPED) $(MAN_INSTALL_DIR)/
+	@if command -v mandb >/dev/null 2>&1; then \
                 sudo mandb -q; \
                 echo "Man database updated"; \
-        else \
+	else \
                 echo "Note: 'mandb' not found, manual cache update may be needed"; \
-        fi
-        @echo "Man page installed to $(MAN_INSTALL_DIR)/"
+	fi
+	@echo "Man page installed to $(MAN_INSTALL_DIR)/"
 
 # Disinstalla man page
 uninstall-man:
-        @echo "Uninstalling man page..."
-        @sudo rm -f $(MAN_INSTALL_DIR)/cpu-manager-go.8.gz
-        @if command -v mandb >/dev/null 2>&1; then \
+	@echo "Uninstalling man page..."
+	@sudo rm -f $(MAN_INSTALL_DIR)/cpu-manager-go.8.gz
+	@if command -v mandb >/dev/null 2>&1; then \
                 sudo mandb -q; \
                 echo "Man database updated"; \
-        fi
-        @echo "Man page uninstalled"
+	fi
+	@echo "Man page uninstalled"
 
 # Genera tutta la documentazione
 docs: man man-html
-        @echo "All documentation generated in $(MAN_BUILD_DIR)/"
+	@echo "All documentation generated in $(MAN_BUILD_DIR)/"
 
 # ============================================================================
 # TARGET ALL-INCLUSIVE
@@ -390,65 +393,65 @@ docs: man man-html
 
 # Target che include tutto (binari, RPM, DEB, documentazione)
 all-with-packages: clean deps test lint build rpm deb docs
-        @echo "Complete build with all packages finished!"
-        @echo "RPM: $(RPMBUILD_DIR)/RPMS/*/*.rpm"
-        @echo "DEB: $(DEB_BUILD_DIR)/*.deb"
-        @echo "Man page: $(MAN_GZIPPED)"
-        @echo "HTML docs: $(MAN_HTML)"
+	@echo "Complete build with all packages finished!"
+	@echo "RPM: $(RPMBUILD_DIR)/RPMS/*/*.rpm"
+	@echo "DEB: $(DEB_BUILD_DIR)/*.deb"
+	@echo "Man page: $(MAN_GZIPPED)"
+	@echo "HTML docs: $(MAN_HTML)"
 
 # ============================================================================
 # HELP
 # ============================================================================
 
 help:
-        @echo "CPU Manager Go - Makefile"
-        @echo ""
-        @echo "Targets disponibili:"
-        @echo "  DEVELOPMENT:"
-        @echo "    build        - Build del binario locale"
-        @echo "    release      - Build multi-architettura"
-        @echo "    static       - Build binario statico"
-        @echo "    test         - Esegui test unitari"
-        @echo "    test-cover   - Test con report coverage"
-        @echo "    lint         - Esegui linting del codice"
-        @echo "    fmt          - Formatta il codice"
-        @echo ""
-        @echo "  INSTALLATION:"
-        @echo "    install      - Installa localmente (binario, config, service)"
-        @echo "    install-man  - Installa solo man page"
-        @echo "    uninstall    - Disinstalla tutto"
-        @echo "    uninstall-man - Disinstalla solo man page"
-        @echo ""
-        @echo "  PACKAGING:"
-        @echo "    rpm          - Crea pacchetto RPM"
-        @echo "    rpm-install  - Crea e installa RPM"
-        @echo "    deb          - Crea pacchetto Debian (.deb)"
-        @echo "    deb-install  - Crea e installa pacchetto Debian"
-        @echo ""
-        @echo "  DOCUMENTATION:"
-        @echo "    man          - Genera man page (gzipped)"
-        @echo "    man-html     - Genera documentazione HTML"
-        @echo "    docs         - Genera tutta la documentazione"
-        @echo "    view-man     - Visualizza man page localmente"
-        @echo ""
-        @echo "  DOCKER:"
-        @echo "    docker-build - Crea immagine Docker"
-        @echo "    docker-run   - Esegui container Docker"
-        @echo ""
-        @echo "  UTILITIES:"
-        @echo "    clean        - Pulisci file di build"
-        @echo "    help         - Mostra questo messaggio"
-        @echo ""
-        @echo "  META TARGETS:"
-        @echo "    all          - clean + test + lint + build"
-        @echo "    all-with-packages - clean + test + lint + build + rpm + deb + docs"
-        @echo ""
-        @echo "Variabili configurabili:"
-        @echo "  VERSION=$(VERSION)"
-        @echo "  RELEASE=$(RELEASE)"
-        @echo "  ARCHES=$(ARCHES)"
-        @echo "  MAN_INSTALL_DIR=$(MAN_INSTALL_DIR)"
-        @echo "  DEB_MAINTAINER=$(DEB_MAINTAINER)"
+	@echo "CPU Manager Go - Makefile"
+	@echo ""
+	@echo "Targets disponibili:"
+	@echo "  DEVELOPMENT:"
+	@echo "    build        - Build del binario locale"
+	@echo "    release      - Build multi-architettura"
+	@echo "    static       - Build binario statico"
+	@echo "    test         - Esegui test unitari"
+	@echo "    test-cover   - Test con report coverage"
+	@echo "    lint         - Esegui linting del codice"
+	@echo "    fmt          - Formatta il codice"
+	@echo ""
+	@echo "  INSTALLATION:"
+	@echo "    install      - Installa localmente (binario, config, service)"
+	@echo "    install-man  - Installa solo man page"
+	@echo "    uninstall    - Disinstalla tutto"
+	@echo "    uninstall-man - Disinstalla solo man page"
+	@echo ""
+	@echo "  PACKAGING:"
+	@echo "    rpm          - Crea pacchetto RPM"
+	@echo "    rpm-install  - Crea e installa RPM"
+	@echo "    deb          - Crea pacchetto Debian (.deb)"
+	@echo "    deb-install  - Crea e installa pacchetto Debian"
+	@echo ""
+	@echo "  DOCUMENTATION:"
+	@echo "    man          - Genera man page (gzipped)"
+	@echo "    man-html     - Genera documentazione HTML"
+	@echo "    docs         - Genera tutta la documentazione"
+	@echo "    view-man     - Visualizza man page localmente"
+	@echo ""
+	@echo "  DOCKER:"
+	@echo "    docker-build - Crea immagine Docker"
+	@echo "    docker-run   - Esegui container Docker"
+	@echo ""
+	@echo "  UTILITIES:"
+	@echo "    clean        - Pulisci file di build"
+	@echo "    help         - Mostra questo messaggio"
+	@echo ""
+	@echo "  META TARGETS:"
+	@echo "    all          - clean + test + lint + build"
+	@echo "    all-with-packages - clean + test + lint + build + rpm + deb + docs"
+	@echo ""
+	@echo "Variabili configurabili:"
+	@echo "  VERSION=$(VERSION)"
+	@echo "  RELEASE=$(RELEASE)"
+	@echo "  ARCHES=$(ARCHES)"
+	@echo "  MAN_INSTALL_DIR=$(MAN_INSTALL_DIR)"
+	@echo "  DEB_MAINTAINER=$(DEB_MAINTAINER)"
 
 # ============================================================================
 # TARGET DI DEFAULT
