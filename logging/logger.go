@@ -19,8 +19,8 @@ package logging
 
 import (
     "fmt"
-//    "io"
     "log"
+    "log/syslog"
     "os"
     "path/filepath"
     "sync"
@@ -60,14 +60,46 @@ type Logger struct {
     maxSize       int64
     logger        *log.Logger
     lastRotation  time.Time
+    UseSyslog     bool
+    syslogWriter  *syslog.Writer
 }
 
 // InitLogger inizializza il logger globale con i parametri specificati.
 // Deve essere chiamato all'avvio dell'applicazione.
-func InitLogger(level string, filePath string, maxSize int) {
+func InitLogger(level string, filePath string, maxSize int, useSyslog bool) {
     once.Do(func() {
         logLevel := parseLogLevel(level)
 
+        // Se syslog è abilitato, crea logger syslog
+        if useSyslog {
+            syslogWriter, err := syslog.New(syslog.LOG_DAEMON|syslog.LOG_INFO, "cpu-manager-go")
+            if err != nil {
+                log.Printf("ERROR: Failed to initialize syslog: %v", err)
+                // Fallback a stdout
+                currentLogger = createStdoutLogger(logLevel)
+                return
+            }
+
+            // Crea logger con syslog
+            currentLogger = &Logger{
+                level:        logLevel,
+                file:         nil,
+                filePath:     "",
+                maxSize:      0,
+                logger:       log.New(syslogWriter, "", 0),
+                UseSyslog:    true,
+                syslogWriter: syslogWriter,
+            }
+
+            // Logga il primo messaggio via syslog
+            currentLogger.logInternal(INFO, "Logger initialized (syslog)",
+                "level", levelNames[logLevel],
+                "syslog", true,
+            )
+            return
+        }
+
+        // ALTRIMENTI: usa file di log (comportamento originale)
         // Crea la directory del log se non esiste
         if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
             log.Printf("ERROR: Failed to create log directory: %v", err)
@@ -91,8 +123,10 @@ func InitLogger(level string, filePath string, maxSize int) {
             file:         file,
             filePath:     filePath,
             maxSize:      int64(maxSize),
-            logger:       log.New(file, "", 0), // Il prefisso sarà gestito da noi
+            logger:       log.New(file, "", 0),
             lastRotation: time.Now(),
+            UseSyslog:    false,
+            syslogWriter: nil,
         }
 
         // Logga il primo messaggio
@@ -108,7 +142,7 @@ func InitLogger(level string, filePath string, maxSize int) {
 func GetLogger() *Logger {
     if currentLogger == nil {
         // Se non inizializzato, crea un logger di default su stdout
-        InitLogger("INFO", "/var/log/cpu-manager.log", 10*1024*1024)
+        InitLogger("INFO", "/var/log/cpu-manager.log", 10*1024*1024, false)
     }
     return currentLogger
 }
@@ -131,8 +165,9 @@ func parseLogLevel(level string) LogLevel {
 func createStdoutLogger(level LogLevel) *Logger {
     return &Logger{
         level:  level,
-        file:   nil, // Indica che stiamo usando stdout
+        file:   nil,
         logger: log.New(os.Stdout, "", 0),
+        UseSyslog: false,
     }
 }
 
@@ -165,12 +200,28 @@ func (l *Logger) logInternal(level LogLevel, msg string, keyvals ...interface{})
         }
     }
 
-    // Scrivi sul logger sottostante
-    l.logger.Println(logMsg)
+    // Se usiamo syslog, gestiamo i livelli appropriati
+    if l.UseSyslog && l.syslogWriter != nil {
+        switch level {
+        case DEBUG:
+            l.syslogWriter.Debug(logMsg)
+        case INFO:
+            l.syslogWriter.Info(logMsg)
+        case WARN:
+            l.syslogWriter.Warning(logMsg)
+        case ERROR:
+            l.syslogWriter.Err(logMsg)
+        default:
+            l.syslogWriter.Info(logMsg)
+        }
+    } else {
+        // Scrivi sul logger sottostante (file/stdout)
+        l.logger.Println(logMsg)
 
-    // Verifica e gestisci la rotazione del log (solo per file-based logger)
-    if l.file != nil {
-        l.checkAndRotate()
+        // Verifica e gestisci la rotazione del log (solo per file-based logger)
+        if l.file != nil {
+            l.checkAndRotate()
+        }
     }
 }
 
@@ -255,10 +306,7 @@ func (l *Logger) Error(msg string, keyvals ...interface{}) {
 }
 
 // WithField crea un nuovo logger con un campo aggiuntivo.
-// Utile per aggiungere contesto come "component", "user_id", ecc.
 func (l *Logger) WithField(key string, value interface{}) *Logger {
-    // Per semplicità, restituiamo lo stesso logger.
-    // In un'implementazione più avanzata, potremmo creare una copia con campi contestuali.
     return l
 }
 
@@ -273,6 +321,10 @@ func (l *Logger) SetLevel(level string) {
 func (l *Logger) Close() error {
     l.mu.Lock()
     defer l.mu.Unlock()
+
+    if l.UseSyslog && l.syslogWriter != nil {
+        return l.syslogWriter.Close()
+    }
 
     if l.file != nil {
         return l.file.Close()
