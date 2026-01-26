@@ -45,6 +45,7 @@ PROMETHEUS_HOST=192.168.1.7
 # ========================
 LOG_LEVEL=DEBUG
 LOG_MAX_SIZE=10485760
+USE_SYSLOG=true
 
 # ========================
 # SYSTEM
