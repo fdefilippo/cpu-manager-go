@@ -96,6 +96,14 @@ install -m 644 README.md %{buildroot}/%{_docdir}/%{name}-%{version}/
 install -m 644 LICENSE %{buildroot}/%{_docdir}/%{name}-%{version}/
 install -m 644 config/cpu-manager.conf.example %{buildroot}/%{_docdir}/%{name}-%{version}/
 
+# Installazione file di configurazione syslog
+install -d %{buildroot}%{_sysconfdir}/rsyslog.d
+install -p -m 0644 packaging/syslog/cpu-manager-go.conf %{buildroot}%{_sysconfdir}/rsyslog.d/cpu-manager-go.conf
+
+# Installazione file di configurazione logrotate
+install -d %{buildroot}%{_sysconfdir}/logrotate.d
+install -p -m 0644 packaging/syslog/cpu-manager-go %{buildroot}%{_sysconfdir}/logrotate.d/cpu-manager-go
+
 # Crea directory per runtime files
 install -d -m 755 %{buildroot}/%{_sharedstatedir}/cpu-manager
 
@@ -163,6 +171,8 @@ rmdir /var/run/cpu-manager 2>/dev/null || true
 %{_unitdir}/cpu-manager.service
 %{_mandir}/man8/cpu-manager.8.gz
 %dir %{_sharedstatedir}/cpu-manager
+%config(noreplace) %{_sysconfdir}/rsyslog.d/cpu-manager-go.conf
+%config %{_sysconfdir}/logrotate.d/cpu-manager-go
 
 %files doc
 %license LICENSE
