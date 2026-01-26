@@ -63,8 +63,8 @@ func main() {
         return
     }
 
-    // Inizializzazione logger
-    logging.InitLogger("INFO", "/var/log/cpu-manager.log", 10*1024*1024)
+    // Inizializzazione logger con valori di default
+    logging.InitLogger("INFO", "/var/log/cpu-manager.log", 10*1024*1024, false)
     logger := logging.GetLogger()
     logger.Info("Starting CPU Manager", "version", version)
 
@@ -77,16 +77,21 @@ func main() {
     logger.Info("Configuration loaded successfully")
 
     // Riconfigurazione logger con valori dalla config
-    logging.InitLogger(cfg.LogLevel, cfg.LogFile, cfg.LogMaxSize)
+    logging.InitLogger(cfg.LogLevel, cfg.LogFile, cfg.LogMaxSize, cfg.UseSyslog)
     logger = logging.GetLogger()
-    logger.Debug("Debug logging enabled")
+
+    if cfg.UseSyslog {
+        logger.Info("Syslog logging enabled")
+    } else {
+        logger.Debug("File logging enabled")
+    }
 
     // Setup graceful shutdown
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
 
     // Canale per i segnali
-    sigChan := make(chan os.Signal, 2) // Buffer di 2 per SIGHUP + SIGINT/TERM
+    sigChan := make(chan os.Signal, 2)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
     // Inizializzazione componenti
@@ -122,7 +127,6 @@ func main() {
             prometheusExporter, err = metrics.NewPrometheusExporter(cfg)
             if err != nil {
                 logger.Error("Failed to initialize Prometheus exporter", "error", err)
-                // Continuiamo senza Prometheus
                 prometheusExporter = nil
             } else if prometheusExporter != nil {
                 if err := prometheusExporter.Start(ctx); err != nil {
@@ -153,7 +157,6 @@ func main() {
     if *configPath != "" {
       reloader := reloader.NewReloader(stateManager, cgroupMgr, metricsCollector, prometheusExporter)
 
-      // Crea e avvia il watcher di configurazione
       configWatcher, err = config.NewWatcher(*configPath, cfg, reloader)
       if err != nil {
           logger.Warn("Failed to create config watcher, continuing without auto-reload",
@@ -167,6 +170,7 @@ func main() {
           }
       }
     }
+
     // Goroutine per gestione segnali
     go func() {
         for {
@@ -178,7 +182,6 @@ func main() {
                 case syscall.SIGHUP:
                   logger.Info("Received SIGHUP, forcing configuration reload")
                   if configWatcher != nil {
-                    // Usa il metodo pubblico invece del cast
                     go func() {
                       time.Sleep(100 * time.Millisecond)
                       configWatcher.HandleConfigChange()
@@ -192,7 +195,6 @@ func main() {
                     )
                     cancel()
 
-                    // Timeout per shutdown graceful
                     go func() {
                         time.Sleep(10 * time.Second)
                         logger.Warn("Forced shutdown after timeout")
@@ -217,15 +219,12 @@ func main() {
     for {
         select {
         case <-ctx.Done():
-            // Shutdown graceful
             logger.Info("Shutting down main control loop")
 
-            // Ferma il watcher di configurazione
             if configWatcher != nil {
                 configWatcher.Stop()
             }
 
-            // Pulizia dei componenti
             if err := stateManager.Cleanup(); err != nil {
                 logger.Error("Error during cleanup", "error", err)
             }
@@ -234,13 +233,11 @@ func main() {
             return
 
         case <-ticker.C:
-            // Ciclo di controllo regolare
             startTime := time.Now()
             if err := stateManager.RunControlCycle(ctx); err != nil {
                 logger.Error("Error in control cycle", "error", err)
             }
 
-            // Log della durata del ciclo (debug level)
             duration := time.Since(startTime)
             if duration > time.Duration(cfg.PollingInterval/2)*time.Second {
                 logger.Warn("Control cycle took longer than expected",
