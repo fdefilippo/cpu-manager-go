@@ -20,31 +20,6 @@ Enterprise-grade dynamic CPU resource management tool using Linux cgroups v2. Au
 - **Graceful shutdown** with cleanup
 - **Complete man page** documentation
 
-## 📊 Architecture Overview
-
-```mermaid
-graph TB
-    A[CPU Manager] --> B[Metrics Collector]
-    A --> C[Cgroup Manager]
-    A --> D[State Manager]
-    A --> E[Prometheus Exporter]
-    
-    B --> F[System Metrics<br/>CPU, Memory, Load]
-    C --> G[cgroups v2<br/>cpu.max limits]
-    D --> H[Decision Engine<br/>Threshold logic]
-    E --> I[HTTP Server<br/>/metrics endpoint]
-    
-    F --> D
-    D --> C
-    I --> J[Grafana Dashboard]
-    
-    K[Configuration File] --> A
-    L[SIGHUP Signal] --> A
-    
-    style A fill:#e1f5fe
-    style J fill:#f3e5f5
-```
-
 ## Build RPM package
 make rpm
 ### Install
