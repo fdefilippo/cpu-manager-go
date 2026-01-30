@@ -15,6 +15,8 @@ Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+# Priorità CPU (da -20 a 19, dove -20 è la più alta)
+Nice=-10
 
 # Limiti di sicurezza
 LimitNOFILE=65536
