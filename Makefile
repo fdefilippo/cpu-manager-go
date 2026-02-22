@@ -8,7 +8,7 @@
 
 # Nome del progetto
 PROJECT_NAME = cpu-manager-go
-VERSION = 1.0.0
+VERSION = 1.1.0
 RELEASE = 1
 
 # Percorsi
@@ -21,7 +21,7 @@ BUILD_DIR = build
 DIST_DIR = dist
 RPMBUILD_DIR = $(HOME)/rpmbuild
 DEB_BUILD_DIR = $(BUILD_DIR)/deb
-BIN_DIR = /usr/local/bin
+BIN_DIR = /usr/bin
 CONF_DIR = /etc
 SYSTEMD_DIR = /usr/lib/systemd/system
 
@@ -37,8 +37,8 @@ OSES = linux
 # Debian packaging
 DEB_ARCH_amd64 = amd64
 DEB_ARCH_arm64 = arm64
-DEB_MAINTAINER = "CPU Manager Project <team@cpu-manager.example.com>"
-DEB_DESCRIPTION = "CPU Manager - Sistema di gestione delle risorse CPU per container"
+DEB_MAINTAINER = Francesco Defilippo <francesco@defilippo.org>
+DEB_DESCRIPTION = CPU Manager - Sistema di gestione delle risorse CPU
 
 # ============================================================================
 # TARGET PRINCIPALI
@@ -151,11 +151,14 @@ rpm-dirs:
 rpm-source: build rpm-dirs
 	@echo "Creating source tarball for RPM..."
 	mkdir -p $(PROJECT_NAME)-$(VERSION)
-	cp -r *.go go.mod go.sum config/ cgroup/ metrics/ state/ logging/ reloader/ \
-                README.md LICENSE packaging/ docs/ $(PROJECT_NAME)-$(VERSION)/
+	cp -r *.go go.mod go.sum \
+		config/ cgroup/ metrics/ state/ logging/ reloader/ \
+		README.md LICENSE CHANGELOG.md \
+		packaging/ docs/ \
+		$(PROJECT_NAME)-$(VERSION)/
 	mkdir -p $(PROJECT_NAME)-$(VERSION)/packaging/syslog
-	cp packaging/syslog/cpu-manager-go.conf $(PROJECT_NAME)-$(VERSION)/packaging/syslog/
-	cp packaging/syslog/cpu-manager-go $(PROJECT_NAME)-$(VERSION)/packaging/syslog/
+	cp packaging/syslog/cpu-manager-go.conf $(PROJECT_NAME)-$(VERSION)/packaging/syslog/ 2>/dev/null || true
+	cp packaging/syslog/cpu-manager-go $(PROJECT_NAME)-$(VERSION)/packaging/syslog/ 2>/dev/null || true
 	tar czf $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz $(PROJECT_NAME)-$(VERSION)
 	rm -rf $(PROJECT_NAME)-$(VERSION)
 	@echo "Source tarball creato: $(RPMBUILD_DIR)/SOURCES/$(PROJECT_NAME)-$(VERSION).tar.gz"
@@ -182,103 +185,80 @@ deb-dirs:
 	mkdir -p $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)
 
 # Build binario per Debian (per architettura specifica)
-deb-binary: deps test lint
+deb-binary: deps
 	@echo "Building binary for Debian package..."
 	@mkdir -p $(DEB_BUILD_DIR)
-	@for arch in $(ARCHES); do \
-                echo "Building Debian binary for $$arch..."; \
-                GOOS=linux GOARCH=$$arch $(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) \
-                        -o $(DEB_BUILD_DIR)/$(PROJECT_NAME)-$$arch; \
-	done
+	$(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) -o $(DEB_BUILD_DIR)/$(PROJECT_NAME)-amd64
+	$(GO) build $(GO_FLAGS) $(GO_LDFLAGS) $(GO_TAGS) -o $(DEB_BUILD_DIR)/$(PROJECT_NAME)-arm64
 
 # Prepara struttura pacchetto Debian
 deb-prepare: deb-dirs deb-binary
 	@echo "Preparing Debian package structure..."
-	@for arch in $(ARCHES); do \
-                DEB_ARCH=$$(eval echo \$$DEB_ARCH_$$arch); \
-                echo "Preparing package for $$DEB_ARCH..."; \
-                PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
-                mkdir -p $$PKG_DIR/DEBIAN; \
-                mkdir -p $$PKG_DIR$(BIN_DIR); \
-                mkdir -p $$PKG_DIR$(CONF_DIR); \
-                mkdir -p $$PKG_DIR$(SYSTEMD_DIR); \
-                mkdir -p $$PKG_DIR/usr/share/doc/$(PROJECT_NAME); \
-                \
-                # Copia binario \
-                install -m 755 $(DEB_BUILD_DIR)/$(PROJECT_NAME)-$$arch $$PKG_DIR$(BIN_DIR)/$(PROJECT_NAME); \
-                \
-                # Copia configurazione \
-                install -m 644 config/cpu-manager.conf.example $$PKG_DIR$(CONF_DIR)/cpu-manager.conf; \
-                \
-                # Copia service systemd \
-                install -m 644 packaging/systemd/cpu-manager.service $$PKG_DIR$(SYSTEMD_DIR)/; \
-                \
-                # Copia documentazione \
-                install -m 644 README.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
-                install -m 644 LICENSE $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
-                cp docs/* $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/ 2>/dev/null || true; \
-                \
-                # Crea file di controllo Debian \
-                cat > $$PKG_DIR/DEBIAN/control << EOF; \
-Package: $(PROJECT_NAME) \
-Version: $(VERSION)-$(RELEASE) \
-Section: utils \
-Priority: optional \
-Architecture: $$DEB_ARCH \
-Maintainer: $(DEB_MAINTAINER) \
-Description: $(DEB_DESCRIPTION) \
-  CPU Manager è un sistema avanzato per la gestione delle risorse CPU. \
-  Fornisce isolamento, limitazione e monitoraggio delle risorse CPU per container. \
-EOF \
-                \
-                # Crea script post-installazione \
-                cat > $$PKG_DIR/DEBIAN/postinst << EOF; \
-#!/bin/bash \
-set -e \
-if [ "\$$1" = "configure" ]; then \
-    systemctl daemon-reload 2>/dev/null || true \
-    echo "CPU Manager $(VERSION) installed successfully" \
-fi \
-exit 0 \
-EOF \
-                chmod 755 $$PKG_DIR/DEBIAN/postinst; \
-                \
-                # Crea script pre-rimozione \
-                cat > $$PKG_DIR/DEBIAN/prerm << EOF; \
-#!/bin/bash \
-set -e \
-if [ "\$$1" = "remove" ] || [ "\$$1" = "upgrade" ]; then \
-    systemctl stop cpu-manager 2>/dev/null || true \
-    systemctl disable cpu-manager 2>/dev/null || true \
-fi \
-exit 0 \
-EOF \
-                chmod 755 $$PKG_DIR/DEBIAN/prerm; \
-                \
-                # Crea script post-rimozione \
-                cat > $$PKG_DIR/DEBIAN/postrm << EOF; \
-#!/bin/bash \
-set -e \
-if [ "\$$1" = "remove" ] || [ "\$$1" = "upgrade" ]; then \
-    systemctl daemon-reload 2>/dev/null || true \
-fi \
-exit 0 \
-EOF \
-                chmod 755 $$PKG_DIR/DEBIAN/postrm; \
-	done
+	DEB_ARCH=$(DEB_ARCH_amd64); \
+	echo "Preparing package for $$DEB_ARCH..."; \
+	PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
+	mkdir -p $$PKG_DIR/DEBIAN; \
+	mkdir -p $$PKG_DIR$(BIN_DIR); \
+	mkdir -p $$PKG_DIR$(CONF_DIR); \
+	mkdir -p $$PKG_DIR$(SYSTEMD_DIR); \
+	mkdir -p $$PKG_DIR/usr/share/doc/$(PROJECT_NAME); \
+	mkdir -p $$PKG_DIR$(CONF_DIR)/cpu-manager/tls; \
+	install -m 755 $(DEB_BUILD_DIR)/$(PROJECT_NAME)-amd64 $$PKG_DIR$(BIN_DIR)/$(PROJECT_NAME); \
+	install -m 644 config/cpu-manager.conf.example $$PKG_DIR$(CONF_DIR)/cpu-manager.conf; \
+	install -m 644 packaging/systemd/cpu-manager.service $$PKG_DIR$(SYSTEMD_DIR)/; \
+	install -m 644 README.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 LICENSE $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 CHANGELOG.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 docs/TLS-CONFIGURATION.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 docs/MULTI-INSTANCE-MONITORING.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 docs/prometheus-queries.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	install -m 644 docs/alerting-rules.yml $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
+	mkdir -p $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/scripts; \
+	install -m 755 docs/generate-tls-certs.sh $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/scripts/; \
+	echo "Package: $(PROJECT_NAME)" > $$PKG_DIR/DEBIAN/control; \
+	echo "Version: $(VERSION)-$(RELEASE)" >> $$PKG_DIR/DEBIAN/control; \
+	echo "Section: utils" >> $$PKG_DIR/DEBIAN/control; \
+	echo "Priority: optional" >> $$PKG_DIR/DEBIAN/control; \
+	echo "Architecture: $$DEB_ARCH" >> $$PKG_DIR/DEBIAN/control; \
+	echo "Maintainer: $(DEB_MAINTAINER)" >> $$PKG_DIR/DEBIAN/control; \
+	echo "Description: $(DEB_DESCRIPTION)" >> $$PKG_DIR/DEBIAN/control; \
+	echo "  CPU Manager è un sistema avanzato per la gestione delle risorse CPU." >> $$PKG_DIR/DEBIAN/control; \
+	echo "  Fornisce isolamento, limitazione e monitoraggio delle risorse CPU per container." >> $$PKG_DIR/DEBIAN/control; \
+	echo "  Supporta TLS/HTTPS, Basic Auth e JWT authentication." >> $$PKG_DIR/DEBIAN/control; \
+	echo '#!/bin/bash' > $$PKG_DIR/DEBIAN/postinst; \
+	echo 'set -e' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo 'if [ "$$1" = "configure" ]; then' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo '    systemctl daemon-reload 2>/dev/null || true' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo '    echo "CPU Manager $(VERSION) installed successfully"' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo '    echo "TLS certificates: /etc/cpu-manager/tls/"' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo '    echo "Generate certs: /usr/share/doc/cpu-manager/scripts/generate-tls-certs.sh"' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo 'fi' >> $$PKG_DIR/DEBIAN/postinst; \
+	echo 'exit 0' >> $$PKG_DIR/DEBIAN/postinst; \
+	chmod 755 $$PKG_DIR/DEBIAN/postinst; \
+	echo '#!/bin/bash' > $$PKG_DIR/DEBIAN/prerm; \
+	echo 'set -e' >> $$PKG_DIR/DEBIAN/prerm; \
+	echo 'if [ "$$1" = "remove" ] || [ "$$1" = "upgrade" ]; then' >> $$PKG_DIR/DEBIAN/prerm; \
+	echo '    systemctl stop cpu-manager 2>/dev/null || true' >> $$PKG_DIR/DEBIAN/prerm; \
+	echo '    systemctl disable cpu-manager 2>/dev/null || true' >> $$PKG_DIR/DEBIAN/prerm; \
+	echo 'fi' >> $$PKG_DIR/DEBIAN/prerm; \
+	echo 'exit 0' >> $$PKG_DIR/DEBIAN/prerm; \
+	chmod 755 $$PKG_DIR/DEBIAN/prerm; \
+	echo '#!/bin/bash' > $$PKG_DIR/DEBIAN/postrm; \
+	echo 'set -e' >> $$PKG_DIR/DEBIAN/postrm; \
+	echo 'if [ "$$1" = "remove" ] || [ "$$1" = "upgrade" ]; then' >> $$PKG_DIR/DEBIAN/postrm; \
+	echo '    systemctl daemon-reload 2>/dev/null || true' >> $$PKG_DIR/DEBIAN/postrm; \
+	echo 'fi' >> $$PKG_DIR/DEBIAN/postrm; \
+	echo 'exit 0' >> $$PKG_DIR/DEBIAN/postrm; \
+	chmod 755 $$PKG_DIR/DEBIAN/postrm
 	@echo "Debian package structure prepared in $(DEB_BUILD_DIR)/"
 
 # Build pacchetto Debian
 deb: deb-prepare
 	@echo "Building Debian packages..."
-	@for arch in $(ARCHES); do \
-                DEB_ARCH=$$(eval echo \$$DEB_ARCH_$$arch); \
-                echo "Building .deb for $$DEB_ARCH..."; \
-                PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
-                dpkg-deb --build $$PKG_DIR $(DEB_BUILD_DIR)/; \
-                mv $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb \
-                   $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb; \
-	done
+	DEB_ARCH=$(DEB_ARCH_amd64); \
+	PKG_DIR=$(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH; \
+	echo "Building .deb for $$DEB_ARCH..."; \
+	dpkg-deb --build $$PKG_DIR $(DEB_BUILD_DIR)/$(PROJECT_NAME)_$(VERSION)-$(RELEASE)_$$DEB_ARCH.deb
 	@echo "Debian packages created in $(DEB_BUILD_DIR)/"
 
 # Installa pacchetto Debian (locale)

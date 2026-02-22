@@ -54,6 +54,22 @@ type Config struct {
     PrometheusPort   int    `config:"PROMETHEUS_PORT"`
     PrometheusHost   string `config:"PROMETHEUS_HOST"`
 
+    // Prometheus TLS/HTTPS (optional)
+    PrometheusTLSEnabled     bool   `config:"PROMETHEUS_TLS_ENABLED"`
+    PrometheusTLSCertFile    string `config:"PROMETHEUS_TLS_CERT_FILE"`
+    PrometheusTLSKeyFile     string `config:"PROMETHEUS_TLS_KEY_FILE"`
+    PrometheusTLSCAFile      string `config:"PROMETHEUS_TLS_CA_FILE"`
+    PrometheusTLSMinVersion  string `config:"PROMETHEUS_TLS_MIN_VERSION"`  // 1.0, 1.1, 1.2, 1.3
+
+    // Prometheus Authentication
+    PrometheusAuthType     string `config:"PROMETHEUS_AUTH_TYPE"`     // none, basic, jwt, both
+    PrometheusAuthUsername string `config:"PROMETHEUS_AUTH_USERNAME"`
+    PrometheusAuthPasswordFile string `config:"PROMETHEUS_AUTH_PASSWORD_FILE"`
+    PrometheusJWTSecretFile    string `config:"PROMETHEUS_JWT_SECRET_FILE"`
+    PrometheusJWTIssuer        string `config:"PROMETHEUS_JWT_ISSUER"`
+    PrometheusJWTAudience      string `config:"PROMETHEUS_JWT_AUDIENCE"`
+    PrometheusJWTExpiry        int    `config:"PROMETHEUS_JWT_EXPIRY"`  // seconds
+
     // Logging
     LogLevel   string `config:"LOG_LEVEL"`
     LogMaxSize int    `config:"LOG_MAX_SIZE"` // in bytes
@@ -100,6 +116,22 @@ func DefaultConfig() *Config {
         EnablePrometheus: false,
         PrometheusPort:   9101,
         PrometheusHost:   "127.0.0.1",
+
+        // Prometheus TLS (disabled by default)
+        PrometheusTLSEnabled:     false,
+        PrometheusTLSCertFile:    "/etc/cpu-manager/tls/server.crt",
+        PrometheusTLSKeyFile:     "/etc/cpu-manager/tls/server.key",
+        PrometheusTLSCAFile:      "",
+        PrometheusTLSMinVersion:  "1.2",  // TLS 1.2 minimum recommended
+
+        // Prometheus Authentication (disabled by default)
+        PrometheusAuthType:     "none",
+        PrometheusAuthUsername: "",
+        PrometheusAuthPasswordFile: "",
+        PrometheusJWTSecretFile:    "",
+        PrometheusJWTIssuer:        "cpu-manager",
+        PrometheusJWTAudience:      "prometheus",
+        PrometheusJWTExpiry:        3600,
 
         LogLevel:   "INFO",
         LogMaxSize: 10 * 1024 * 1024, // 10MB
@@ -282,6 +314,43 @@ func setConfigField(cfg *Config, key, value string) error {
     case "PROMETHEUS_HOST":
         cfg.PrometheusHost = value
 
+    // Prometheus TLS
+    case "PROMETHEUS_TLS_ENABLED":
+        switch strings.ToLower(value) {
+        case "true", "1", "yes", "on":
+            cfg.PrometheusTLSEnabled = true
+        case "false", "0", "no", "off":
+            cfg.PrometheusTLSEnabled = false
+        default:
+            cfg.PrometheusTLSEnabled = false
+        }
+    case "PROMETHEUS_TLS_CERT_FILE":
+        cfg.PrometheusTLSCertFile = value
+    case "PROMETHEUS_TLS_KEY_FILE":
+        cfg.PrometheusTLSKeyFile = value
+    case "PROMETHEUS_TLS_CA_FILE":
+        cfg.PrometheusTLSCAFile = value
+    case "PROMETHEUS_TLS_MIN_VERSION":
+        cfg.PrometheusTLSMinVersion = strings.ToUpper(value)
+
+    // Prometheus Authentication
+    case "PROMETHEUS_AUTH_TYPE":
+        cfg.PrometheusAuthType = strings.ToLower(value)
+    case "PROMETHEUS_AUTH_USERNAME":
+        cfg.PrometheusAuthUsername = value
+    case "PROMETHEUS_AUTH_PASSWORD_FILE":
+        cfg.PrometheusAuthPasswordFile = value
+    case "PROMETHEUS_JWT_SECRET_FILE":
+        cfg.PrometheusJWTSecretFile = value
+    case "PROMETHEUS_JWT_ISSUER":
+        cfg.PrometheusJWTIssuer = value
+    case "PROMETHEUS_JWT_AUDIENCE":
+        cfg.PrometheusJWTAudience = value
+    case "PROMETHEUS_JWT_EXPIRY":
+        if i, err := strconv.Atoi(value); err == nil {
+            cfg.PrometheusJWTExpiry = i
+        }
+
     // Logging
     case "LOG_LEVEL":
         cfg.LogLevel = strings.ToUpper(value)
@@ -369,7 +438,7 @@ func validateConfig(cfg *Config) error {
     }
 
     if len(errors) > 0 {
-        return fmt.Errorf(strings.Join(errors, "; "))
+        return fmt.Errorf("%s", strings.Join(errors, "; "))
     }
     return nil
 }

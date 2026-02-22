@@ -29,6 +29,7 @@ import (
 
     "github.com/fdefilippo/cpu-manager-go/config"
     "github.com/fdefilippo/cpu-manager-go/logging"
+    "github.com/fdefilippo/cpu-manager-go/metrics"
 )
 
 // Manager coordina tutta la logica di gestione della CPU.
@@ -63,6 +64,7 @@ type MetricsCollector interface {
     GetActiveUsers() []int
     GetMemoryUsage() float64
     IsSystemUnderLoad() bool
+    GetAllUserMetrics() map[int]*metrics.UserMetrics
 }
 
 // CgroupManager è l'interfaccia per gestire i cgroups.
@@ -85,10 +87,11 @@ type CgroupManager interface {
 // PrometheusExporter è l'interfaccia per esportare metriche Prometheus.
 type PrometheusExporter interface {
     UpdateMetrics(metrics map[string]float64)
-    UpdateUserMetrics(uid int, username string, cpuUsage float64, isLimited bool, cgroupPath, cpuQuota string)
+    UpdateUserMetrics(uid int, username string, cpuUsage float64, memoryUsage uint64, processCount int, isLimited bool, cgroupPath, cpuQuota string)
     UpdateSystemMetrics(totalCores int, systemLoad float64)
     Start(ctx context.Context) error
     Stop() error
+    CleanupUserMetrics(activeUids map[int]bool)
 }
 
 // NewManager crea un nuovo Manager con le dipendenze configurate.
@@ -186,6 +189,7 @@ type SystemMetrics struct {
     SystemUnderLoad    bool
     ActiveUsers        []int
     UserCPUUsage       map[int]float64  // UID -> percentuale
+    UserMetrics        map[int]*metrics.UserMetrics  // Metriche dettagliate per utente
 }
 
 // collectSystemMetrics raccoglie tutte le metriche di sistema necessarie.
@@ -193,6 +197,7 @@ func (m *Manager) collectSystemMetrics() (*SystemMetrics, error) {
     metrics := &SystemMetrics{
         Timestamp: time.Now(),
         UserCPUUsage: make(map[int]float64),
+        UserMetrics: make(map[int]*metrics.UserMetrics),
     }
 
     // Raccogli metriche di base
@@ -203,10 +208,13 @@ func (m *Manager) collectSystemMetrics() (*SystemMetrics, error) {
     metrics.SystemUnderLoad = m.metricsCollector.IsSystemUnderLoad()
     metrics.ActiveUsers = m.metricsCollector.GetActiveUsers()
 
-    // Raccogli uso CPU per ogni utente attivo (con cache)
-    for _, uid := range metrics.ActiveUsers {
-        usage := m.metricsCollector.GetUserCPUUsage(uid)
-        metrics.UserCPUUsage[uid] = usage
+    // Raccogli metriche dettagliate per ogni utente (CPU, memoria, processi) in una sola chiamata
+    allUserMetrics := m.metricsCollector.GetAllUserMetrics()
+    
+    // Popola UserMetrics e UserCPUUsage
+    for uid, userMetrics := range allUserMetrics {
+        metrics.UserMetrics[uid] = userMetrics
+        metrics.UserCPUUsage[uid] = userMetrics.CPUUsage
     }
 
     return metrics, nil
@@ -524,9 +532,13 @@ func (m *Manager) updatePrometheusMetrics(metrics *SystemMetrics) {
 
     m.prometheusExporter.UpdateMetrics(promMetrics)
 
-    // Aggiorna metriche specifiche per utente
-    for uid, usage := range metrics.UserCPUUsage {
-        username := m.getUsername(uid)
+    // Aggiorna metriche specifiche per utente usando UserMetrics
+    for uid, userMetrics := range metrics.UserMetrics {
+        username := userMetrics.Username
+        if username == "" || username == strconv.Itoa(uid) {
+            username = m.getUsername(uid)
+        }
+        
         isLimited := m.isUserLimited(uid)
 
         // Ottieni info cgroup se disponibile
@@ -538,9 +550,25 @@ func (m *Manager) updatePrometheusMetrics(metrics *SystemMetrics) {
             }
         }
 
-        // Usa UpdateUserMetrics direttamente
-        m.prometheusExporter.UpdateUserMetrics(uid, username, usage, isLimited, cgroupPath, cpuQuota)
+        // Usa UpdateUserMetrics con tutti i parametri (CPU, memoria, processi)
+        m.prometheusExporter.UpdateUserMetrics(
+            uid,
+            username,
+            userMetrics.CPUUsage,
+            userMetrics.MemoryUsage,
+            userMetrics.ProcessCount,
+            isLimited,
+            cgroupPath,
+            cpuQuota,
+        )
     }
+
+    // Pulisci metriche per utenti non più attivi
+    activeUids := make(map[int]bool)
+    for uid := range metrics.UserMetrics {
+        activeUids[uid] = true
+    }
+    m.prometheusExporter.CleanupUserMetrics(activeUids)
 
     // Aggiorna metriche di sistema
     if load, err := m.getLoadAverage(); err == nil {

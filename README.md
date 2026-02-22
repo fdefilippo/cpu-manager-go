@@ -3,6 +3,9 @@
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg)](https://golang.org/)
 [![RPM Package](https://img.shields.io/badge/RPM-Package-red.svg)](https://github.com/fdefilippo/cpu-manager-go/releases)
 [![Prometheus](https://img.shields.io/badge/Metrics-Prometheus-orange.svg)](https://prometheus.io/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![CI](https://github.com/fdefilippo/cpu-manager-go/actions/workflows/ci.yml/badge.svg)](https://github.com/fdefilippo/cpu-manager-go/actions/workflows/ci.yml)
+[![Test Coverage](https://github.com/fdefilippo/cpu-manager-go/actions/workflows/test-coverage.yml/badge.svg)](https://github.com/fdefilippo/cpu-manager-go/actions/workflows/test-coverage.yml)
 
 Enterprise-grade dynamic CPU resource management tool using Linux cgroups v2. Automatically limits CPU for non-system users based on configurable thresholds.
 
@@ -12,24 +15,152 @@ Enterprise-grade dynamic CPU resource management tool using Linux cgroups v2. Au
 - **Configurable thresholds** for activation and release
 - **Absolute CPU limits** using `cpu.max` cgroup controller
 - **Prometheus metrics** export with comprehensive dashboard
+- **Per-user metrics**: CPU%, Memory (bytes), Process count
 - **Systemd service** integration with hardening
 - **Automatic configuration reload** on file changes
 - **Detailed process logging** with process name tracking
 - **Load average awareness** (optional)
 - **Graceful shutdown** with cleanup
 - **Complete man page** documentation
+- **Unit tests** for core packages
 
-## Build RPM package
+## 📊 Prometheus Metrics
+
+CPU Manager Go exports detailed metrics for monitoring and alerting:
+
+### System Metrics
+| Metric | Type | Description |
+|--------|------|-------------|
+| `cpu_manager_cpu_total_usage_percent` | Gauge | Total CPU usage percentage |
+| `cpu_manager_cpu_user_usage_percent` | Gauge | Non-system user CPU usage |
+| `cpu_manager_memory_usage_megabytes` | Gauge | Total memory usage |
+| `cpu_manager_system_load_average` | Gauge | System load (1 min) |
+| `cpu_manager_active_users_count` | Gauge | Active non-system users |
+| `cpu_manager_limited_users_count` | Gauge | Users with CPU limits |
+| `cpu_manager_limits_active` | Gauge | Limits status (1=active) |
+
+### Per-User Metrics (with `uid` and `username` labels)
+| Metric | Type | Description |
+|--------|------|-------------|
+| `cpu_manager_user_cpu_usage_percent` | Gauge | CPU usage per user |
+| `cpu_manager_user_memory_usage_bytes` | Gauge | Memory usage per user |
+| `cpu_manager_user_process_count` | Gauge | Process count per user |
+| `cpu_manager_user_cpu_limited` | Gauge | User limit status |
+
+### Example Queries
+```promql
+# Top 5 users by CPU usage
+topk(5, cpu_manager_user_cpu_usage_percent)
+
+# Total memory used by all users
+sum(cpu_manager_user_memory_usage_bytes)
+
+# Alert: User memory exceeds 2GB
+cpu_manager_user_memory_usage_bytes > 2147483648
+
+# Processes for specific user
+cpu_manager_user_process_count{username="francesco"}
+```
+
+See [docs/prometheus-queries.md](docs/prometheus-queries.md) for more examples.
+
+## 🔐 Prometheus Authentication
+
+CPU Manager Go supports optional authentication for securing metrics endpoints:
+
+### Basic Authentication
+```bash
+# /etc/cpu-manager.conf
+PROMETHEUS_AUTH_TYPE=basic
+PROMETHEUS_AUTH_USERNAME=prometheus
+PROMETHEUS_AUTH_PASSWORD_FILE=/etc/cpu-manager/prometheus_password
+```
+
+### JWT (Bearer Token) Authentication
+```bash
+# /etc/cpu-manager.conf
+PROMETHEUS_AUTH_TYPE=jwt
+PROMETHEUS_JWT_SECRET_FILE=/etc/cpu-manager/jwt_secret
+PROMETHEUS_JWT_ISSUER=cpu-manager
+PROMETHEUS_JWT_AUDIENCE=prometheus
+PROMETHEUS_JWT_EXPIRY=3600
+```
+
+### Both Methods
+```bash
+# Support both Basic Auth and JWT
+PROMETHEUS_AUTH_TYPE=both
+```
+
+## 🔒 TLS/HTTPS Encryption
+
+Enable HTTPS encryption for metrics endpoints:
+
+```bash
+# /etc/cpu-manager.conf
+PROMETHEUS_TLS_ENABLED=true
+PROMETHEUS_TLS_CERT_FILE=/etc/cpu-manager/tls/server.crt
+PROMETHEUS_TLS_KEY_FILE=/etc/cpu-manager/tls/server.key
+PROMETHEUS_TLS_CA_FILE=/etc/cpu-manager/tls/ca.crt
+PROMETHEUS_TLS_MIN_VERSION=1.2
+```
+
+### Generate TLS Certificates
+
+```bash
+# Use the provided script
+sudo ./docs/generate-tls-certs.sh /etc/cpu-manager/tls
+```
+
+See [docs/TLS-CONFIGURATION.md](docs/TLS-CONFIGURATION.md) for detailed TLS setup.
+
+See [docs/MULTI-INSTANCE-MONITORING.md](docs/MULTI-INSTANCE-MONITORING.md) for detailed configuration.
+
+## 📈 Grafana Dashboard
+
+A comprehensive Grafana dashboard is included with panels for:
+- CPU Usage Overview (total + per user)
+- Memory Usage Per User
+- Processes Per User
+- Active Users & Limit Status
+- Control Cycle Performance
+- Error Rate by Component
+
+Import `docs/dashboard-grafana.json` into Grafana to get started.
+
+## 🚀 Quick Start
+
+### Build RPM package
+```bash
 make rpm
+```
+
+### Build Debian package
+```bash
+make deb
+```
+
 ### Install
-rpm -ivh ~/rpmbuild/RPMS/\*/cpu-manager-go-\*.rpm
+```bash
+# RPM
+rpm -ivh ~/rpmbuild/RPMS/*/cpu-manager-go-*.rpm
+
+# Debian
+dpkg -i build/deb/cpu-manager-go_*.deb
+```
+
 ### Configure
+```bash
 vi /etc/cpu-manager.conf
+```
+
 ### Start service
+```bash
 systemctl enable --now cpu-manager
+```
 
 ## Prerequisites: Enabling cgroups v2 on Enterprise Linux ≥ 8
-CPU Manager requires cgroups v2 with CPU and cpuset controllers enabled. 
+CPU Manager requires cgroups v2 with CPU and cpuset controllers enabled.
 Here's how to enable them on RHEL/CentOS/Rocky/AlmaLinux ≥ 8:
 ```
 # Enable unified cgroup hierarchy
@@ -63,3 +194,44 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 ```
+
+## 🧪 Testing
+
+Run unit tests:
+```bash
+make test
+```
+
+Run tests with coverage:
+```bash
+make test-cover
+```
+
+## 📖 Documentation
+
+- [Man page](docs/cpu-manager.8) - Full command reference
+- [Prometheus Queries](docs/prometheus-queries.md) - Example queries
+- [Alerting Rules](docs/alerting-rules.yml) - Prometheus alerting
+- [Grafana Dashboard](docs/dashboard-grafana.json) - Pre-built dashboard
+
+## Configuration
+
+See [config/cpu-manager.conf.example](config/cpu-manager.conf.example) for all available options.
+
+Key settings:
+- `CPU_THRESHOLD` - Activation threshold (default: 75%)
+- `CPU_RELEASE_THRESHOLD` - Deactivation threshold (default: 40%)
+- `POLLING_INTERVAL` - Control cycle interval (default: 30s)
+- `MIN_SYSTEM_CORES` - Cores reserved for system (default: 2)
+- `ENABLE_PROMETHEUS` - Enable metrics export (default: false)
+- `PROMETHEUS_PORT` - Metrics port (default: 9101)
+
+## System Requirements
+
+- Linux kernel 4.5+ (cgroups v2)
+- Write access to /sys/fs/cgroup
+- Root privileges or CAP_SYS_ADMIN capability
+
+## License
+
+GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
