@@ -35,6 +35,15 @@ import (
     "github.com/shirou/gopsutil/v3/process"
 )
 
+// UserMetrics contiene le metriche per un singolo utente.
+type UserMetrics struct {
+    UID          int
+    Username     string
+    CPUUsage     float64  // Percentuale CPU
+    MemoryUsage  uint64   // Memoria in bytes (VmRSS)
+    ProcessCount int      // Numero di processi
+}
+
 // Collector raccoglie metriche di sistema.
 type Collector struct {
     cfg        *config.Config
@@ -691,4 +700,228 @@ func (c *Collector) GetSystemLoad() (float64, error) {
     }
 
     return load1, nil
+}
+
+// GetAllUserMetrics restituisce le metriche (CPU, memoria, processi) per tutti gli utenti attivi.
+// Questa funzione scansiona /proc una sola volta per efficienza.
+func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
+    cacheKey := "all_user_metrics"
+    if val, valid := c.getFromCache(cacheKey, time.Duration(c.cfg.MetricsCacheTTL)*time.Second); valid {
+        if metrics, ok := val.(map[int]*UserMetrics); ok {
+            return metrics
+        }
+    }
+
+    userMetrics := make(map[int]*UserMetrics)
+    procDir := "/proc"
+
+    entries, err := os.ReadDir(procDir)
+    if err != nil {
+        c.logger.Warn("Failed to read /proc directory for user metrics", "error", err)
+        return userMetrics
+    }
+
+    // Mappa temporanea per accumulare i dati per UID
+    type userData struct {
+        cpuUsage     float64
+        memoryUsage  uint64
+        processCount int
+    }
+    tempData := make(map[int]*userData)
+
+    for _, entry := range entries {
+        if !entry.IsDir() {
+            continue
+        }
+
+        pid, err := strconv.Atoi(entry.Name())
+        if err != nil {
+            continue
+        }
+
+        // Leggi UID del processo
+        statusFile := filepath.Join(procDir, entry.Name(), "status")
+        uid, err := c.getUIDFromStatusFile(statusFile)
+        if err != nil || !c.isValidUserUID(uid) {
+            continue
+        }
+
+        // Inizializza struttura se non esiste
+        if tempData[uid] == nil {
+            tempData[uid] = &userData{}
+        }
+
+        // Conta il processo
+        tempData[uid].processCount++
+
+        // Leggi uso CPU
+        cpuUsage := c.getProcessCPUUsageSimple(pid)
+        tempData[uid].cpuUsage += cpuUsage
+
+        // Leggi uso memoria (VmRSS in bytes)
+        memoryUsage := c.getProcessMemoryUsage(pid)
+        tempData[uid].memoryUsage += memoryUsage
+    }
+
+    // Converte in UserMetrics con username
+    for uid, data := range tempData {
+        userMetrics[uid] = &UserMetrics{
+            UID:          uid,
+            Username:     c.getUsernameFromUID(uid),
+            CPUUsage:     data.cpuUsage,
+            MemoryUsage:  data.memoryUsage,
+            ProcessCount: data.processCount,
+        }
+    }
+
+    c.setInCache(cacheKey, userMetrics)
+    return userMetrics
+}
+
+// GetUserMemoryUsage restituisce la memoria totale usata da un utente in bytes.
+func (c *Collector) GetUserMemoryUsage(uid int) uint64 {
+    if !c.isValidUserUID(uid) {
+        return 0
+    }
+
+    cacheKey := fmt.Sprintf("memory_usage_uid_%d", uid)
+    if val, valid := c.getFromCache(cacheKey, time.Duration(c.cfg.MetricsCacheTTL)*time.Second); valid {
+        return val.(uint64)
+    }
+
+    var totalMemory uint64
+
+    procDir := "/proc"
+    entries, err := os.ReadDir(procDir)
+    if err != nil {
+        c.logger.Warn("Failed to read /proc for memory stats", "error", err)
+        return 0
+    }
+
+    for _, entry := range entries {
+        if !entry.IsDir() {
+            continue
+        }
+
+        pid, err := strconv.Atoi(entry.Name())
+        if err != nil {
+            continue
+        }
+
+        statusFile := filepath.Join(procDir, entry.Name(), "status")
+        procUID, err := c.getUIDFromStatusFile(statusFile)
+        if err != nil || procUID != uid {
+            continue
+        }
+
+        memoryUsage := c.getProcessMemoryUsage(pid)
+        totalMemory += memoryUsage
+    }
+
+    c.setInCache(cacheKey, totalMemory)
+    return totalMemory
+}
+
+// getProcessMemoryUsage restituisce la memoria RSS di un processo in bytes.
+// Legge VmRSS da /proc/[pid]/status.
+func (c *Collector) getProcessMemoryUsage(pid int) uint64 {
+    statusFile := fmt.Sprintf("/proc/%d/status", pid)
+    data, err := os.ReadFile(statusFile)
+    if err != nil {
+        return 0
+    }
+
+    lines := strings.Split(string(data), "\n")
+    for _, line := range lines {
+        if strings.HasPrefix(line, "VmRSS:") {
+            fields := strings.Fields(line)
+            if len(fields) >= 2 {
+                // VmRSS è in kB, converti in bytes
+                kb, err := strconv.ParseUint(fields[1], 10, 64)
+                if err != nil {
+                    return 0
+                }
+                return kb * 1024
+            }
+        }
+    }
+
+    return 0
+}
+
+// getProcessCPUUsageSimple calcola l'uso CPU di un processo usando gopsutil se disponibile.
+func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
+    proc, err := process.NewProcess(int32(pid))
+    if err != nil {
+        return 0
+    }
+
+    cpuPercent, err := proc.CPUPercent()
+    if err != nil {
+        return 0
+    }
+
+    return cpuPercent
+}
+
+// getUsernameFromUID converte un UID in username leggendo /etc/passwd.
+func (c *Collector) getUsernameFromUID(uid int) string {
+    file, err := os.Open("/etc/passwd")
+    if err != nil {
+        return strconv.Itoa(uid)
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := scanner.Text()
+        fields := strings.Split(line, ":")
+        if len(fields) >= 3 {
+            if fields[2] == strconv.Itoa(uid) {
+                return fields[0]
+            }
+        }
+    }
+
+    return strconv.Itoa(uid)
+}
+
+// GetUserProcessCount restituisce il numero di processi di un utente.
+func (c *Collector) GetUserProcessCount(uid int) int {
+    if !c.isValidUserUID(uid) {
+        return 0
+    }
+
+    cacheKey := fmt.Sprintf("process_count_uid_%d", uid)
+    if val, valid := c.getFromCache(cacheKey, time.Duration(c.cfg.MetricsCacheTTL)*time.Second); valid {
+        return val.(int)
+    }
+
+    count := 0
+    procDir := "/proc"
+
+    entries, err := os.ReadDir(procDir)
+    if err != nil {
+        return 0
+    }
+
+    for _, entry := range entries {
+        if !entry.IsDir() {
+            continue
+        }
+
+        _, err := strconv.Atoi(entry.Name())
+        if err != nil {
+            continue
+        }
+
+        statusFile := filepath.Join(procDir, entry.Name(), "status")
+        procUID, err := c.getUIDFromStatusFile(statusFile)
+        if err == nil && procUID == uid {
+            count++
+        }
+    }
+
+    c.setInCache(cacheKey, count)
+    return count
 }

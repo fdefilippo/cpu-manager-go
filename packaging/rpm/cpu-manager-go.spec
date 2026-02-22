@@ -1,5 +1,13 @@
 # SPEC file per cpu-manager-go
 # Build con: rpmbuild -ba cpu-manager-go.spec
+#
+# Questo spec crea un UNICO pacchetto RPM contenente:
+# - Binario
+# - File di configurazione
+# - Systemd service
+# - Man page
+# - Documentazione
+# - Script generazione certificati TLS
 
 Name:    cpu-manager-go
 Version: 1.0.0
@@ -26,8 +34,10 @@ Source0: %{name}-%{version}.tar.gz
 BuildRequires:  golang >= 1.21
 BuildRequires:  systemd
 BuildRequires:  groff-base
+BuildRequires:  openssl
 Requires:       systemd
 Requires:       golang >= 1.21
+Requires:       openssl
 
 # Dipendenze cgroups
 Requires(post): systemd-units
@@ -46,14 +56,7 @@ Features:
 - Automatic configuration reload on changes
 - Detailed process logging
 - Complete man page documentation
-
-%package doc
-Summary: Documentation for %{name}
-License: MIT
-Requires: %{name} = %{version}-%{release}
-
-%description doc
-Documentation for %{name}, including man page and configuration examples.
+- Per-user metrics: CPU%, Memory, Process count
 
 %prep
 %setup -q
@@ -96,6 +99,19 @@ install -m 644 README.md %{buildroot}/%{_docdir}/%{name}-%{version}/
 install -m 644 LICENSE %{buildroot}/%{_docdir}/%{name}-%{version}/
 install -m 644 config/cpu-manager.conf.example %{buildroot}/%{_docdir}/%{name}-%{version}/
 
+# Installa documentazione TLS
+install -m 644 docs/TLS-CONFIGURATION.md %{buildroot}/%{_docdir}/%{name}-%{version}/
+install -m 644 docs/MULTI-INSTANCE-MONITORING.md %{buildroot}/%{_docdir}/%{name}-%{version}/
+install -m 644 docs/prometheus-queries.md %{buildroot}/%{_docdir}/%{name}-%{version}/
+install -m 644 docs/alerting-rules.yml %{buildroot}/%{_docdir}/%{name}-%{version}/
+
+# Installa script generazione certificati TLS
+install -d %{buildroot}/%{_docdir}/%{name}-%{version}/scripts
+install -m 755 docs/generate-tls-certs.sh %{buildroot}/%{_docdir}/%{name}-%{version}/scripts/
+
+# Installa CHANGELOG
+install -m 644 CHANGELOG.md %{buildroot}/%{_docdir}/%{name}-%{version}/
+
 # Installazione file di configurazione syslog
 install -d %{buildroot}%{_sysconfdir}/rsyslog.d
 install -p -m 0644 packaging/syslog/cpu-manager-go.conf %{buildroot}%{_sysconfdir}/rsyslog.d/cpu-manager-go.conf
@@ -104,8 +120,12 @@ install -p -m 0644 packaging/syslog/cpu-manager-go.conf %{buildroot}%{_sysconfdi
 install -d %{buildroot}%{_sysconfdir}/logrotate.d
 install -p -m 0644 packaging/syslog/cpu-manager-go %{buildroot}%{_sysconfdir}/logrotate.d/cpu-manager-go
 
-# Crea directory per runtime files
+# Crea directory per runtime files (buildroot)
 install -d -m 755 %{buildroot}/%{_sharedstatedir}/cpu-manager
+install -d -m 755 %{buildroot}/var/run/cpu-manager
+
+# Crea directory per certificati TLS (vuota, verrà popolata dall'admin)
+install -d -m 700 %{buildroot}/%{_sysconfdir}/cpu-manager/tls
 
 %pre
 # Pre-install script
@@ -124,6 +144,11 @@ fi
 %post
 # Post-install script
 %systemd_post cpu-manager.service
+
+# Crea directory per i file di runtime
+mkdir -p /var/run/cpu-manager
+chmod 755 /var/run/cpu-manager
+chown root:root /var/run/cpu-manager
 
 # Crea file di log
 touch /var/log/cpu-manager.log
@@ -144,6 +169,7 @@ echo "CPU Manager installed successfully!"
 echo ""
 echo "Configuration file: /etc/cpu-manager.conf"
 echo "Log file: /var/log/cpu-manager.log"
+echo "Runtime directory: /var/run/cpu-manager"
 echo "Service: systemctl start cpu-manager"
 echo "Documentation: man cpu-manager"
 echo ""
@@ -166,20 +192,45 @@ rmdir /var/run/cpu-manager 2>/dev/null || true
 %files
 %license LICENSE
 %doc README.md
+%doc CHANGELOG.md
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/cpu-manager.conf
 %{_unitdir}/cpu-manager.service
 %{_mandir}/man8/cpu-manager.8.gz
 %dir %{_sharedstatedir}/cpu-manager
+%dir /var/run/cpu-manager
+%dir %{_sysconfdir}/cpu-manager/tls
 %config(noreplace) %{_sysconfdir}/rsyslog.d/cpu-manager-go.conf
 %config %{_sysconfdir}/logrotate.d/cpu-manager-go
-
-%files doc
-%license LICENSE
-%doc README.md
-%doc %{_docdir}/%{name}-%{version}/*
+%doc %{_docdir}/%{name}-%{version}/README.md
+%doc %{_docdir}/%{name}-%{version}/LICENSE
+%doc %{_docdir}/%{name}-%{version}/CHANGELOG.md
+%doc %{_docdir}/%{name}-%{version}/cpu-manager.conf.example
+%doc %{_docdir}/%{name}-%{version}/TLS-CONFIGURATION.md
+%doc %{_docdir}/%{name}-%{version}/MULTI-INSTANCE-MONITORING.md
+%doc %{_docdir}/%{name}-%{version}/prometheus-queries.md
+%doc %{_docdir}/%{name}-%{version}/alerting-rules.yml
+%doc %{_docdir}/%{name}-%{version}/scripts/generate-tls-certs.sh
 
 %changelog
+* Sun Feb 22 2026 CPU Manager <francesco@defilippo.org> - 1.0.0-1
+- Added TLS/HTTPS support for Prometheus metrics
+- Added TLS certificate generation script (generate-tls-certs.sh)
+- Added Basic Authentication support for Prometheus
+- Added JWT (Bearer Token) authentication support
+- Added per-user metrics: CPU%, Memory (bytes), Process count
+- Updated Prometheus metrics documentation
+- Added Grafana dashboard with multi-instance support
+- Added comprehensive TLS configuration guide
+- Added multi-instance monitoring guide
+- Added Prometheus alerting rules
+- Added Prometheus query examples
+- Single RPM package with all components (no separate -doc package)
+- Complete cgroups v2 CPU management
+- Dynamic configuration reload
+- Systemd service integration
+- Comprehensive man page documentation
+
 * Thu Jan 22 2026 CPU Manager <francesco@defilippo.org> - 1.0.0-1
 - Initial RPM release with man page support
 - Complete cgroups v2 CPU management

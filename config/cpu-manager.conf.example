@@ -40,6 +40,23 @@ ENABLE_PROMETHEUS=true
 PROMETHEUS_PORT=9100
 PROMETHEUS_HOST=192.168.1.7
 
+# Prometheus TLS/HTTPS (optional)
+PROMETHEUS_TLS_ENABLED=false
+PROMETHEUS_TLS_CERT_FILE=/etc/cpu-manager/tls/server.crt
+PROMETHEUS_TLS_KEY_FILE=/etc/cpu-manager/tls/server.key
+PROMETHEUS_TLS_CA_FILE=/etc/cpu-manager/tls/ca.crt
+PROMETHEUS_TLS_MIN_VERSION=1.2
+
+# Prometheus Authentication (optional)
+# Options: none, basic, jwt, both
+PROMETHEUS_AUTH_TYPE=none
+PROMETHEUS_AUTH_USERNAME=prometheus
+PROMETHEUS_AUTH_PASSWORD_FILE=/etc/cpu-manager/prometheus_password
+PROMETHEUS_JWT_SECRET_FILE=/etc/cpu-manager/jwt_secret
+PROMETHEUS_JWT_ISSUER=cpu-manager
+PROMETHEUS_JWT_AUDIENCE=prometheus
+PROMETHEUS_JWT_EXPIRY=3600
+
 # ========================
 # LOGGING
 # ========================

@@ -20,6 +20,7 @@ package metrics
 import (
   "bufio"
   "context"
+  "crypto/subtle"
   "fmt"
   "net/http"
   "os"
@@ -31,6 +32,7 @@ import (
 
   "github.com/fdefilippo/cpu-manager-go/config"
   "github.com/fdefilippo/cpu-manager-go/logging"
+  "github.com/golang-jwt/jwt/v5"
   "github.com/prometheus/client_golang/prometheus"
   "github.com/prometheus/client_golang/prometheus/promauto"
   "github.com/prometheus/client_golang/prometheus/promhttp"
@@ -56,6 +58,7 @@ type PrometheusExporter struct {
   // Metriche con label
   userCPUUsage      *prometheus.GaugeVec
   userMemoryUsage   *prometheus.GaugeVec  // NUOVO: Memoria per utente
+  userProcessCount  *prometheus.GaugeVec  // NUOVO: Numero processi per utente
   userLimited       *prometheus.GaugeVec
   cgroupCPUQuota    *prometheus.GaugeVec
   cgroupCPUPeriod   *prometheus.GaugeVec
@@ -79,6 +82,15 @@ type PrometheusExporter struct {
   // Stato interno
   isRunning bool
   stopChan  chan struct{}
+
+  // Autenticazione
+  basicAuthPassword string
+  jwtSecret         []byte
+
+  // TLS
+  tlsCertFile string
+  tlsKeyFile  string
+  tlsCAFile   string
 }
 
 // NewPrometheusExporter crea un nuovo esportatore Prometheus.
@@ -109,6 +121,11 @@ exp := &PrometheusExporter{
   stopChan:       make(chan struct{}, 1),
 }
 
+// Carica credenziali di autenticazione e certificati TLS
+if err := exp.loadCredentials(); err != nil {
+  logger.Warn("Failed to load authentication credentials", "error", err)
+}
+
 // Registra metriche
 if err := exp.registerMetrics(); err != nil {
   return nil, fmt.Errorf("failed to register metrics: %w", err)
@@ -120,8 +137,76 @@ exp.registry.MustRegister(
   prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 )
 
-logger.Info("Prometheus exporter created successfully")
+logger.Info("Prometheus exporter created successfully",
+  "auth_type", cfg.PrometheusAuthType,
+)
 return exp, nil
+}
+
+// loadAuthCredentials carica le credenziali di autenticazione e i certificati TLS
+func (exp *PrometheusExporter) loadCredentials() error {
+  // Carica password per Basic Auth
+  if exp.cfg.PrometheusAuthType == "basic" || exp.cfg.PrometheusAuthType == "both" {
+    if exp.cfg.PrometheusAuthPasswordFile != "" {
+      password, err := os.ReadFile(exp.cfg.PrometheusAuthPasswordFile)
+      if err != nil {
+        return fmt.Errorf("failed to read password file: %w", err)
+      }
+      exp.basicAuthPassword = strings.TrimSpace(string(password))
+      exp.logger.Info("Basic authentication password loaded")
+    }
+  }
+
+  // Carica secret per JWT
+  if exp.cfg.PrometheusAuthType == "jwt" || exp.cfg.PrometheusAuthType == "both" {
+    if exp.cfg.PrometheusJWTSecretFile != "" {
+      secret, err := os.ReadFile(exp.cfg.PrometheusJWTSecretFile)
+      if err != nil {
+        return fmt.Errorf("failed to read JWT secret file: %w", err)
+      }
+      exp.jwtSecret = []byte(strings.TrimSpace(string(secret)))
+      exp.logger.Info("JWT secret loaded",
+        "issuer", exp.cfg.PrometheusJWTIssuer,
+        "audience", exp.cfg.PrometheusJWTAudience,
+        "expiry_seconds", exp.cfg.PrometheusJWTExpiry,
+      )
+    }
+  }
+
+  // Carica certificati TLS
+  if exp.cfg.PrometheusTLSEnabled {
+    if exp.cfg.PrometheusTLSCertFile != "" {
+      if _, err := os.Stat(exp.cfg.PrometheusTLSCertFile); err != nil {
+        return fmt.Errorf("TLS certificate file not found: %s", exp.cfg.PrometheusTLSCertFile)
+      }
+      exp.tlsCertFile = exp.cfg.PrometheusTLSCertFile
+      exp.logger.Info("TLS certificate file loaded",
+        "cert_file", exp.cfg.PrometheusTLSCertFile,
+      )
+    }
+
+    if exp.cfg.PrometheusTLSKeyFile != "" {
+      if _, err := os.Stat(exp.cfg.PrometheusTLSKeyFile); err != nil {
+        return fmt.Errorf("TLS key file not found: %s", exp.cfg.PrometheusTLSKeyFile)
+      }
+      exp.tlsKeyFile = exp.cfg.PrometheusTLSKeyFile
+      exp.logger.Info("TLS key file loaded",
+        "key_file", exp.cfg.PrometheusTLSKeyFile,
+      )
+    }
+
+    if exp.cfg.PrometheusTLSCAFile != "" {
+      if _, err := os.Stat(exp.cfg.PrometheusTLSCAFile); err != nil {
+        return fmt.Errorf("TLS CA file not found: %s", exp.cfg.PrometheusTLSCAFile)
+      }
+      exp.tlsCAFile = exp.cfg.PrometheusTLSCAFile
+      exp.logger.Info("TLS CA file loaded",
+        "ca_file", exp.cfg.PrometheusTLSCAFile,
+      )
+    }
+  }
+
+  return nil
 }
 
 // registerMetrics registra tutte le metriche Prometheus.
@@ -196,6 +281,16 @@ func (exp *PrometheusExporter) registerMetrics() error {
       Namespace: namespace,
       Name:      "user_memory_usage_bytes",
       Help:      "Memory usage in bytes per user",
+    },
+    []string{"uid", "username"},
+  )
+
+  // NUOVA METRICA: Numero processi per utente
+  exp.userProcessCount = promauto.With(exp.registry).NewGaugeVec(
+    prometheus.GaugeOpts{
+      Namespace: namespace,
+      Name:      "user_process_count",
+      Help:      "Number of processes per user",
     },
     []string{"uid", "username"},
   )
@@ -370,7 +465,7 @@ func (exp *PrometheusExporter) UpdateMetrics(metrics map[string]float64) {
 }
 
 // UpdateUserMetrics aggiorna le metriche specifiche per utente.
-func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUsage float64, isLimited bool, cgroupPath, cpuQuota string) {
+func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUsage float64, memoryUsage uint64, processCount int, isLimited bool, cgroupPath, cpuQuota string) {
   if exp == nil {
     return
   }
@@ -388,9 +483,11 @@ func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUs
   // Aggiorna uso CPU dell'utente
   exp.userCPUUsage.WithLabelValues(uidStr, username).Set(cpuUsage)
 
-  // Calcola e aggiorna uso memoria dell'utente
-  memoryUsage := exp.getUserMemoryUsage(uid)
+  // Aggiorna uso memoria dell'utente (in bytes)
   exp.userMemoryUsage.WithLabelValues(uidStr, username).Set(float64(memoryUsage))
+
+  // Aggiorna numero processi dell'utente
+  exp.userProcessCount.WithLabelValues(uidStr, username).Set(float64(processCount))
 
   // Aggiorna stato limite
   limitedValue := 0.0
@@ -416,6 +513,19 @@ func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUs
     cgroupMemory := exp.getCgroupMemoryUsage(cgroupPath)
     exp.cgroupMemoryUsage.WithLabelValues(uidStr, cgroupPath).Set(float64(cgroupMemory))
   }
+}
+
+// CleanupUserMetrics rimuove le metriche per gli utenti non più attivi.
+// Nota: questa implementazione è semplificata e tiene traccia internamente degli UID.
+func (exp *PrometheusExporter) CleanupUserMetrics(activeUids map[int]bool) {
+  if exp == nil {
+    return
+  }
+
+  // Nota: Prometheus non espone un modo diretto per iterare sulle label registrate
+  // Per una pulizia corretta, si dovrebbe tenere un registro interno degli UID tracciati
+  // Questa implementazione è un placeholder per futura estensione
+  _ = activeUids
 }
 
 // getUserMemoryUsage calcola l'uso memoria di un utente in bytes
@@ -630,6 +740,143 @@ func (exp *PrometheusExporter) RecordError(component, errorType string) {
   exp.errorsTotal.WithLabelValues(component, errorType).Inc()
 }
 
+// authMiddleware gestisce l'autenticazione per Basic Auth e JWT
+func (exp *PrometheusExporter) authMiddleware(next http.Handler) http.Handler {
+  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    // Se l'autenticazione è disabilitata, passa direttamente
+    if exp.cfg.PrometheusAuthType == "none" || exp.cfg.PrometheusAuthType == "" {
+      next.ServeHTTP(w, r)
+      return
+    }
+
+    authenticated := false
+
+    // Try Basic Auth
+    if exp.cfg.PrometheusAuthType == "basic" || exp.cfg.PrometheusAuthType == "both" {
+      if exp.checkBasicAuth(r) {
+        authenticated = true
+      }
+    }
+
+    // Try JWT Auth
+    if !authenticated && (exp.cfg.PrometheusAuthType == "jwt" || exp.cfg.PrometheusAuthType == "both") {
+      if exp.checkJWTAuth(r) {
+        authenticated = true
+      }
+    }
+
+    if !authenticated {
+      exp.logger.Debug("Authentication failed",
+        "remote_addr", r.RemoteAddr,
+        "path", r.URL.Path,
+      )
+      w.Header().Set("WWW-Authenticate", `Basic realm="CPU Manager Metrics", Bearer`)
+      http.Error(w, "Unauthorized", http.StatusUnauthorized)
+      return
+    }
+
+    exp.logger.Debug("Authentication successful",
+      "remote_addr", r.RemoteAddr,
+      "path", r.URL.Path,
+    )
+    next.ServeHTTP(w, r)
+  })
+}
+
+// checkBasicAuth verifica le credenziali Basic Auth
+func (exp *PrometheusExporter) checkBasicAuth(r *http.Request) bool {
+  username, password, ok := r.BasicAuth()
+  if !ok {
+    return false
+  }
+
+  // Verifica username
+  if subtle.ConstantTimeCompare([]byte(username), []byte(exp.cfg.PrometheusAuthUsername)) != 1 {
+    return false
+  }
+
+  // Verifica password
+  if subtle.ConstantTimeCompare([]byte(password), []byte(exp.basicAuthPassword)) != 1 {
+    return false
+  }
+
+  return true
+}
+
+// checkJWTAuth verifica il token JWT
+func (exp *PrometheusExporter) checkJWTAuth(r *http.Request) bool {
+  authHeader := r.Header.Get("Authorization")
+  if authHeader == "" {
+    return false
+  }
+
+  // Estrai il token Bearer
+  parts := strings.Split(authHeader, " ")
+  if len(parts) != 2 || parts[0] != "Bearer" {
+    return false
+  }
+
+  tokenString := parts[1]
+
+  // Parse e valida il token
+  token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+    // Verifica l'algoritmo
+    if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+      return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+    }
+    return exp.jwtSecret, nil
+  })
+
+  if err != nil {
+    exp.logger.Debug("JWT parse error", "error", err)
+    return false
+  }
+
+  if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+    // Verifica issuer
+    if exp.cfg.PrometheusJWTIssuer != "" {
+      if issuer, ok := claims["iss"].(string); !ok || issuer != exp.cfg.PrometheusJWTIssuer {
+        return false
+      }
+    }
+
+    // Verifica audience
+    if exp.cfg.PrometheusJWTAudience != "" {
+      if audience, ok := claims["aud"].(string); !ok || audience != exp.cfg.PrometheusJWTAudience {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  return false
+}
+
+// healthHandler gestisce l'endpoint /health
+func (exp *PrometheusExporter) healthHandler(w http.ResponseWriter, r *http.Request) {
+  w.Header().Set("Content-Type", "application/json")
+  w.WriteHeader(http.StatusOK)
+  fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s", "auth_enabled": "%s"}`,
+    time.Now().Format(time.RFC3339),
+    exp.cfg.PrometheusAuthType,
+  )
+}
+
+// rootHandler gestisce l'endpoint root
+func (exp *PrometheusExporter) rootHandler(w http.ResponseWriter, r *http.Request) {
+  if r.URL.Path != "/" {
+    http.NotFound(w, r)
+    return
+  }
+  w.Header().Set("Content-Type", "text/html")
+  authInfo := ""
+  if exp.cfg.PrometheusAuthType != "none" && exp.cfg.PrometheusAuthType != "" {
+    authInfo = " (Authentication: " + exp.cfg.PrometheusAuthType + ")"
+  }
+  fmt.Fprintf(w, `<html><body><h1>CPU Manager Metrics%s</h1><p><a href="/metrics">Metrics</a></p><p><a href="/health">Health</a></p></body></html>`, authInfo)
+}
+
 // Start avvia il server HTTP per Prometheus.
 func (exp *PrometheusExporter) Start(ctx context.Context) error {
   if exp == nil {
@@ -646,31 +893,20 @@ func (exp *PrometheusExporter) Start(ctx context.Context) error {
 
   mux := http.NewServeMux()
 
-  // Handler per le metriche
-  mux.Handle("/metrics", promhttp.HandlerFor(
+  // Handler per le metriche con autenticazione
+  mux.Handle("/metrics", exp.authMiddleware(promhttp.HandlerFor(
     exp.registry,
     promhttp.HandlerOpts{
       Registry:          exp.registry,
       EnableOpenMetrics: true,
     },
-  ))
+  )))
 
-  // Health check endpoint
-  mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
-  })
+  // Health check endpoint (senza autenticazione per monitoring)
+  mux.HandleFunc("/health", exp.healthHandler)
 
   // Root endpoint
-  mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-    if r.URL.Path != "/" {
-      http.NotFound(w, r)
-      return
-    }
-    w.Header().Set("Content-Type", "text/html")
-    fmt.Fprintf(w, `<html><body><h1>CPU Manager Metrics</h1><p><a href="/metrics">Metrics</a></p><p><a href="/health">Health</a></p></body></html>`)
-  })
+  mux.HandleFunc("/", exp.rootHandler)
 
   addr := fmt.Sprintf("%s:%d", exp.cfg.PrometheusHost, exp.cfg.PrometheusPort)
   exp.server = &http.Server{
@@ -678,13 +914,39 @@ func (exp *PrometheusExporter) Start(ctx context.Context) error {
     Handler: mux,
   }
 
-  exp.logger.Info("Starting Prometheus HTTP server", "address", addr)
+  // Configura TLS se abilitato
+  if exp.cfg.PrometheusTLSEnabled {
+    exp.logger.Info("Starting Prometheus HTTPS server",
+      "address", addr,
+      "auth_type", exp.cfg.PrometheusAuthType,
+      "tls_enabled", exp.cfg.PrometheusTLSEnabled,
+      "tls_min_version", exp.cfg.PrometheusTLSMinVersion,
+    )
+  } else {
+    exp.logger.Info("Starting Prometheus HTTP server",
+      "address", addr,
+      "auth_type", exp.cfg.PrometheusAuthType,
+      "tls_enabled", false,
+    )
+  }
 
   // Avvia il server in una goroutine
   listenErr := make(chan error, 1)
   go func() {
-    if err := exp.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-      exp.logger.Error("Prometheus HTTP server error", "error", err)
+    var err error
+    if exp.cfg.PrometheusTLSEnabled {
+      // HTTPS con TLS
+      if exp.tlsCertFile == "" || exp.tlsKeyFile == "" {
+        listenErr <- fmt.Errorf("TLS enabled but certificate or key file not configured")
+        return
+      }
+      err = exp.server.ListenAndServeTLS(exp.tlsCertFile, exp.tlsKeyFile)
+    } else {
+      // HTTP semplice
+      err = exp.server.ListenAndServe()
+    }
+    if err != nil && err != http.ErrServerClosed {
+      exp.logger.Error("Prometheus server error", "error", err)
       listenErr <- err
     }
   }()
