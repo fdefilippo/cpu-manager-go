@@ -77,6 +77,19 @@ MIN_SYSTEM_CORES=1
 SYSTEM_UID_MIN=1000
 # SYSTEM_UID_MAX viene letto automaticamente da /proc/sys/kernel/pid_max
 
+# ========================
+# USER WHITELIST (Optional)
+# ========================
+# Se specificata, limita il monitoraggio e l'applicazione dei limiti solo
+# agli utenti elencati. Se vuota o non specificata, tutti gli utenti non-system
+# (UID >= SYSTEM_UID_MIN) sono considerati.
+# Formato: lista di username separati da virgola, senza spazi
+# Esempi:
+#   USER_WHITELIST=francesco                    # Solo un utente
+#   USER_WHITELIST=alice,bob,charlie           # Multipli utenti
+#   USER_WHITELIST=www-data,mysql,redis        # Utenti di servizio
+# USER_WHITELIST=francesco,www-data
+
 # LOAD AVERAGE HANDLING
 # ========================
 # false: non attiva limiti se il sistema è già sotto carico (default conservativo)

@@ -5,6 +5,56 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
+## [1.6.0] - 2026-03-11
+
+### Aggiunto
+
+#### User Whitelist
+- Nuova variabile di configurazione `USER_WHITELIST` per filtrare utenti monitorati
+- Lista di username separati da virgola (es: `francesco,www-data,mysql`)
+- Se vuota o non specificata: tutti gli utenti non-system (comportamento default)
+- Se specificata: solo gli utenti nella whitelist sono monitorati e limitati
+- Metodo `IsUserWhitelisted()` in config per verificare appartenenza
+- Filtraggio applicato in:
+  - `GetActiveUsers()` - solo utenti whitelisted
+  - `GetAllUserMetrics()` - solo metriche utenti whitelisted
+
+### Modificato
+
+#### Configurazione
+- `config/config.go`: Aggiunto campo `UserWhitelist []string`
+- `config/config.go`: Implementato parsing lista username da stringa CSV
+- `config/config.go`: Aggiunto metodo `IsUserWhitelisted()` per verifica
+- `config/cpu-manager.conf.example`: Aggiunta sezione USER_WHITELIST con esempi
+
+#### Metrics Collector
+- `metrics/collector.go`: `GetActiveUsers()` filtra per whitelist
+- `metrics/collector.go`: `GetAllUserMetrics()` filtra per whitelist
+- `metrics/collector.go`: Controllo whitelist dopo validazione UID
+
+### Comportamento
+
+| Configurazione | Comportamento |
+|---------------|---------------|
+| `USER_WHITELIST=` (vuoto) | Tutti gli utenti non-system |
+| `USER_WHITELIST=francesco` | Solo utente "francesco" |
+| `USER_WHITELIST=alice,bob` | Solo "alice" e "bob" |
+| Non specificato | Tutti gli utenti non-system |
+
+### Esempio di Utilizzo
+
+```bash
+# /etc/cpu-manager.conf
+
+# Monitora e limita solo utenti specifici
+USER_WHITELIST=francesco,www-data,mysql
+
+# Oppure lascia vuoto per comportamento default (tutti gli utenti)
+# USER_WHITELIST=
+```
+
+---
+
 ## [1.5.0] - 2026-03-11
 
 ### Cambiato
@@ -460,6 +510,7 @@ Il formato delle versioni è `MAJOR.MINOR.PATCH`:
 
 ## Link
 
+- [1.6.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.5.0...v1.6.0
 - [1.5.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.4.0...v1.5.0
 - [1.4.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.3.0...v1.4.0
 - [1.3.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.2.0...v1.3.0

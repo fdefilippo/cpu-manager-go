@@ -60,8 +60,9 @@ MCP_ENABLED=true
 MCP_TRANSPORT=stdio
 
 # HTTP/SSE settings (only for http/sse transport)
-MCP_HTTP_HOST=127.0.0.1
-MCP_HTTP_PORT=8080
+# MCP_HTTP_HOST=0.0.0.0      # Default: all interfaces (0.0.0.0)
+# MCP_HTTP_PORT=1969         # Default: 1969
+# MCP endpoint: http://HOST:PORT/mcp
 
 # Log level
 MCP_LOG_LEVEL=INFO

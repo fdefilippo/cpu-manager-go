@@ -80,6 +80,9 @@ type Config struct {
     SystemUIDMin   int `config:"SYSTEM_UID_MIN"`
     SystemUIDMax   int `config:"SYSTEM_UID_MAX"`
 
+    // User Whitelist (optional)
+    UserWhitelist []string `config:"USER_WHITELIST"`  // Comma-separated list of usernames
+
     // Load checking
     IgnoreSystemLoad bool `config:"IGNORE_SYSTEM_LOAD"`
 
@@ -153,6 +156,7 @@ func DefaultConfig() *Config {
         SystemUIDMax:   pidMax,
         IgnoreSystemLoad: false,
         ServerRole:       "",  // Empty by default
+        UserWhitelist:     nil, // nil = all users (no whitelist)
 
         // MCP Server
         MCPEnabled:       false,
@@ -408,6 +412,27 @@ func setConfigField(cfg *Config, key, value string) error {
         if i, err := strconv.Atoi(value); err == nil {
             cfg.SystemUIDMax = i
         }
+
+    // User Whitelist
+    case "USER_WHITELIST":
+        // Parse comma-separated list of usernames
+        value = strings.TrimSpace(value)
+        if value == "" {
+            cfg.UserWhitelist = nil // Empty = all users
+        } else {
+            usernames := strings.Split(value, ",")
+            cfg.UserWhitelist = make([]string, 0, len(usernames))
+            for _, username := range usernames {
+                username = strings.TrimSpace(username)
+                if username != "" {
+                    cfg.UserWhitelist = append(cfg.UserWhitelist, username)
+                }
+            }
+            if len(cfg.UserWhitelist) == 0 {
+                cfg.UserWhitelist = nil
+            }
+        }
+
     // Load checking
     case "IGNORE_SYSTEM_LOAD":
         switch strings.ToLower(value) {
@@ -519,4 +544,18 @@ func isValidCPUQuota(quota string) bool {
     _, err1 := strconv.Atoi(parts[0])
     _, err2 := strconv.Atoi(parts[1])
     return err1 == nil && err2 == nil
+}
+
+// IsUserWhitelisted verifica se un username è nella whitelist
+// Se la whitelist è nil o vuota, tutti gli utenti sono considerati whitelisted
+func (c *Config) IsUserWhitelisted(username string) bool {
+    if c.UserWhitelist == nil || len(c.UserWhitelist) == 0 {
+        return true // No whitelist = all users allowed
+    }
+    for _, whitelisted := range c.UserWhitelist {
+        if whitelisted == username {
+            return true
+        }
+    }
+    return false
 }

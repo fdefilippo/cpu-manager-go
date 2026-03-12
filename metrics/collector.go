@@ -22,6 +22,7 @@ import (
     "fmt"
 //    "io"
     "os"
+    "os/user"
     "path/filepath"
     "strconv"
     "strings"
@@ -431,7 +432,11 @@ func (c *Collector) GetActiveUsers() []int {
             if uids, err := p.Uids(); err == nil && len(uids) > 0 {
                 uid := int(uids[0])
                 if c.isValidUserUID(uid) {
-                    uidMap[uid] = true
+                    // Check whitelist if configured
+                    username := c.getUsername(uid)
+                    if c.cfg.IsUserWhitelisted(username) {
+                        uidMap[uid] = true
+                    }
                 }
             }
         }
@@ -450,6 +455,14 @@ func (c *Collector) GetActiveUsers() []int {
     return users
 }
 
+// getUsername ritorna la username
+func (c *Collector) getUsername(uid int) string {
+    u, err := user.LookupId(fmt.Sprintf("%d", uid))
+    if err != nil {
+        return fmt.Sprintf("%d", uid) // fallback: ritorna l'uid come stringa
+    }
+    return u.Username
+}
 // getActiveUsersFromProc legge gli utenti attivi da /proc.
 func (c *Collector) getActiveUsersFromProc() map[int]bool {
     uidMap := make(map[int]bool)
@@ -744,6 +757,12 @@ func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
         uid, err := c.getUIDFromStatusFile(statusFile)
         if err != nil || !c.isValidUserUID(uid) {
             continue
+        }
+
+        // Check whitelist if configured
+        username := c.getUsername(uid)
+        if !c.cfg.IsUserWhitelisted(username) {
+            continue // Skip users not in whitelist
         }
 
         // Inizializza struttura se non esiste
