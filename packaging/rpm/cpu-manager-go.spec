@@ -36,7 +36,6 @@ BuildRequires:  systemd
 BuildRequires:  groff-base
 BuildRequires:  openssl
 Requires:       systemd
-Requires:       golang >= 1.21
 Requires:       openssl
 
 # Dipendenze cgroups
