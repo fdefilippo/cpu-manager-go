@@ -1,8 +1,0 @@
-CPU Manager espone le seguenti ulteriori funzioni:
-
-Configurazione dei limiti CPU: Impostazione e modifica dei limiti di utilizzo della CPU per utenti o gruppi.
-Monitoraggio delle prestazioni: Analisi delle prestazioni della CPU e report sulle risorse utilizzate.
-Gestione delle priorità: Assegnazione di priorità ai processi in esecuzione.
-Reportistica: Generazione di report dettagliati sull’utilizzo della CPU.
-Notifiche: Avvisi in caso di superamento dei limiti impostati.
-Interfaccia di configurazione: Strumenti per configurare facilmente le impostazioni di CPU Manager.
