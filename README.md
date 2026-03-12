@@ -260,6 +260,37 @@ Key settings:
 - Linux kernel 4.5+ (cgroups v2)
 - Write access to /sys/fs/cgroup
 - Root privileges or CAP_SYS_ADMIN capability
+- **GCC compiler** (required for CGO and user lookup via NSS)
+- **glibc with NSS support** (for LDAP, NIS, SSSD authentication backends)
+
+### Build Requirements
+
+To build CPU Manager Go from source:
+
+- Go 1.21 or later
+- GCC (for CGO support)
+- CGO enabled (`CGO_ENABLED=1`)
+
+**Important:** CGO is required for proper user name resolution via NSS (Name Service Switch). This allows CPU Manager to work with:
+- Local users (`/etc/passwd`)
+- LDAP/Active Directory users
+- NIS users
+- SSSD-managed users
+
+### Building with CGO
+
+```bash
+# Standard build with CGO enabled
+export CGO_ENABLED=1
+export CC=gcc
+go build -v -ldflags="-s -w -X 'main.version=1.6.0'" -o cpu-manager-go .
+
+# Build RPM package (CGO automatically enabled)
+make rpm
+
+# Build Debian package (CGO automatically enabled)
+make deb
+```
 
 ## License
 

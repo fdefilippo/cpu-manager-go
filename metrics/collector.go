@@ -22,7 +22,7 @@ import (
     "fmt"
 //    "io"
     "os"
-    "os/user"
+//    "os/user"  // Non necessario con implementazione pure-Go
     "path/filepath"
     "strconv"
     "strings"
@@ -455,13 +455,51 @@ func (c *Collector) GetActiveUsers() []int {
     return users
 }
 
-// getUsername ritorna la username
+// getUsername ritorna la username dato un UID
+// Implementazione pure-Go che non richiede CGO
 func (c *Collector) getUsername(uid int) string {
-    u, err := user.LookupId(fmt.Sprintf("%d", uid))
-    if err != nil {
-        return fmt.Sprintf("%d", uid) // fallback: ritorna l'uid come stringa
+    // Prova a leggere da /etc/passwd
+    username, err := c.getUsernameFromPasswd(uid)
+    if err == nil && username != "" {
+        return username
     }
-    return u.Username
+    
+    // Fallback finale: ritorna l'UID come stringa
+    return fmt.Sprintf("%d", uid)
+}
+
+// getUsernameFromPasswd legge il username da /etc/passwd senza usare CGO
+func (c *Collector) getUsernameFromPasswd(uid int) (string, error) {
+    file, err := os.Open("/etc/passwd")
+    if err != nil {
+        return "", err
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := scanner.Text()
+        if strings.HasPrefix(line, "#") {
+            continue // Salta commenti
+        }
+        
+        fields := strings.Split(line, ":")
+        if len(fields) >= 3 {
+            // Campo 0: username
+            // Campo 2: UID (come stringa)
+            fileUID, err := strconv.Atoi(fields[2])
+            if err == nil && fileUID == uid {
+                return fields[0], nil
+            }
+        }
+    }
+
+    return "", fmt.Errorf("UID %d not found in /etc/passwd", uid)
+}
+
+// getUsernameFromUID è un alias per coerenza con il resto del codice
+func (c *Collector) getUsernameFromUID(uid int) string {
+    return c.getUsername(uid)
 }
 // getActiveUsersFromProc legge gli utenti attivi da /proc.
 func (c *Collector) getActiveUsersFromProc() map[int]bool {
@@ -881,28 +919,6 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
     }
 
     return cpuPercent
-}
-
-// getUsernameFromUID converte un UID in username leggendo /etc/passwd.
-func (c *Collector) getUsernameFromUID(uid int) string {
-    file, err := os.Open("/etc/passwd")
-    if err != nil {
-        return strconv.Itoa(uid)
-    }
-    defer file.Close()
-
-    scanner := bufio.NewScanner(file)
-    for scanner.Scan() {
-        line := scanner.Text()
-        fields := strings.Split(line, ":")
-        if len(fields) >= 3 {
-            if fields[2] == strconv.Itoa(uid) {
-                return fields[0]
-            }
-        }
-    }
-
-    return strconv.Itoa(uid)
 }
 
 // GetUserProcessCount restituisce il numero di processi di un utente.

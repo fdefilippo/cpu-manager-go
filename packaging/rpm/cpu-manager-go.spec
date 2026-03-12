@@ -48,6 +48,13 @@ Requires(postun): systemd-units
 Enterprise-grade CPU resource management tool with cgroups v2 support.
 Automatically limits CPU for non-system users based on configurable thresholds.
 
+**IMPORTANT: CGO is required for this package**
+
+CGO is enabled by default in this RPM and is required for:
+- User name resolution via NSS (Name Service Switch)
+- Support for LDAP, NIS, SSSD authentication backends
+- Proper integration with system authentication services
+
 Features:
 - Dynamic CPU limiting for non-system users (UID >=1000)
 - Configurable activation/release thresholds

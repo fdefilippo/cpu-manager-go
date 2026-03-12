@@ -215,8 +215,14 @@ func loadFromFile(path string, cfg *Config) error {
 
         key := strings.TrimSpace(parts[0])
         value := strings.TrimSpace(parts[1])
-        // Rimuovi eventuali virgolette
-        value = strings.Trim(value, `"'`)
+        
+        // Rimuovi commenti inline (tutto dopo #)
+        if commentIdx := strings.Index(value, "#"); commentIdx != -1 {
+            value = value[:commentIdx]
+        }
+        
+        // Rimuovi eventuali virgolette e spazi extra
+        value = strings.TrimSpace(strings.Trim(value, `"'`))
 
         if err := setConfigField(cfg, key, value); err != nil {
             return fmt.Errorf("setting key %s on line %d: %w", key, i+1, err)

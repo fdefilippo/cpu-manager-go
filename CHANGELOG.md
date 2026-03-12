@@ -5,7 +5,7 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
-## [1.6.0] - 2026-03-11
+## [1.6.0] - 2026-03-12
 
 ### Aggiunto
 
@@ -19,18 +19,43 @@ e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/)
   - `GetActiveUsers()` - solo utenti whitelisted
   - `GetAllUserMetrics()` - solo metriche utenti whitelisted
 
+#### CGO Requirement
+- **CGO ora è richiesto** per la compilazione
+- Necessario per user name resolution tramite NSS (Name Service Switch)
+- Supporto completo per backend di autenticazione:
+  - Local users (`/etc/passwd`)
+  - LDAP/Active Directory
+  - NIS
+  - SSSD (System Security Services Daemon)
+- Documentati requisiti di build nel README.md
+- Aggiornato Makefile per abilitare esplicitamente CGO
+
 ### Modificato
 
 #### Configurazione
 - `config/config.go`: Aggiunto campo `UserWhitelist []string`
 - `config/config.go`: Implementato parsing lista username da stringa CSV
 - `config/config.go`: Aggiunto metodo `IsUserWhitelisted()` per verifica
+- `config/config.go`: **Fix parsing commenti inline** - Ora gestisce correttamente commenti dopo i valori
 - `config/cpu-manager.conf.example`: Aggiunta sezione USER_WHITELIST con esempi
 
 #### Metrics Collector
 - `metrics/collector.go`: `GetActiveUsers()` filtra per whitelist
 - `metrics/collector.go`: `GetAllUserMetrics()` filtra per whitelist
-- `metrics/collector.go`: Controllo whitelist dopo validazione UID
+- `metrics/collector.go`: **Rimosso fallback `os/user.LookupId()`** - Usa solo `/etc/passwd` con fallback a UID
+- `metrics/collector.go`: Implementato `getUsernameFromPasswd()` per lookup senza CGO
+
+#### Build System
+- `Makefile`: Aggiunto `CGO_ENABLED=1` esplicito
+- `Makefile`: Aggiunti `CGO_CFLAGS` e `CGO_LDFLAGS`
+- `packaging/rpm/cpu-manager-go.spec`: Documentato requisito CGO
+- `README.md`: Aggiunta sezione "Build Requirements" con dettagli CGO
+
+### Fix
+
+#### Bug Fix
+- Risolto problema parsing configurazione con commenti inline
+- Risolto problema "Prometheus exporter disabled" con commenti nel file di config
 
 ### Comportamento
 
@@ -40,6 +65,13 @@ e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/)
 | `USER_WHITELIST=francesco` | Solo utente "francesco" |
 | `USER_WHITELIST=alice,bob` | Solo "alice" e "bob" |
 | Non specificato | Tutti gli utenti non-system |
+
+### Note di Migrazione
+
+**CGO è ora richiesto:**
+- Assicurarsi di avere GCC installato (`yum install gcc` o `apt install gcc`)
+- Build RPM/DEB gestiscono automaticamente CGO
+- User name resolution ora usa NSS (supporta LDAP, NIS, SSSD)
 
 ### Esempio di Utilizzo
 
@@ -51,6 +83,10 @@ USER_WHITELIST=francesco,www-data,mysql
 
 # Oppure lascia vuoto per comportamento default (tutti gli utenti)
 # USER_WHITELIST=
+
+# Commenti inline ora funzionano correttamente
+ENABLE_PROMETHEUS=true  # Abilita Prometheus
+PROMETHEUS_METRICS_BIND_PORT=1974  # Porta default
 ```
 
 ---
