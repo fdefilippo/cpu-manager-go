@@ -50,9 +50,9 @@ type Config struct {
     CPUQuotaLimited  string `config:"CPU_QUOTA_LIMITED"`
 
     // Prometheus
-    EnablePrometheus bool   `config:"ENABLE_PROMETHEUS"`
-    PrometheusPort   int    `config:"PROMETHEUS_PORT"`
-    PrometheusHost   string `config:"PROMETHEUS_HOST"`
+    EnablePrometheus        bool   `config:"ENABLE_PROMETHEUS"`
+    PrometheusMetricsBindHost string `config:"PROMETHEUS_METRICS_BIND_HOST"`
+    PrometheusMetricsBindPort int    `config:"PROMETHEUS_METRICS_BIND_PORT"`
 
     // Prometheus TLS/HTTPS (optional)
     PrometheusTLSEnabled     bool   `config:"PROMETHEUS_TLS_ENABLED"`
@@ -82,6 +82,17 @@ type Config struct {
 
     // Load checking
     IgnoreSystemLoad bool `config:"IGNORE_SYSTEM_LOAD"`
+
+    // Server Role
+    ServerRole string `config:"SERVER_ROLE"`  // e.g., database, web-frontend, batch, application, etc.
+
+    // MCP Server
+    MCPEnabled       bool   `config:"MCP_ENABLED"`
+    MCPTransport     string `config:"MCP_TRANSPORT"`
+    MCPHTTPPort      int    `config:"MCP_HTTP_PORT"`
+    MCPHTTPHost      string `config:"MCP_HTTP_HOST"`
+    MCPLogLevel      string `config:"MCP_LOG_LEVEL"`
+    MCPAllowWriteOps bool   `config:"MCP_ALLOW_WRITE_OPS"`
 }
 
 // DefaultConfig restituisce la configurazione predefinita (come nel tuo script Bash).
@@ -113,9 +124,9 @@ func DefaultConfig() *Config {
         CPUQuotaNormal:  "max 100000",
         CPUQuotaLimited: "50000 100000", // 0.5 core
 
-        EnablePrometheus: false,
-        PrometheusPort:   9101,
-        PrometheusHost:   "127.0.0.1",
+        EnablePrometheus:        false,
+        PrometheusMetricsBindHost: "",  // Empty = use default 0.0.0.0
+        PrometheusMetricsBindPort: 1974,
 
         // Prometheus TLS (disabled by default)
         PrometheusTLSEnabled:     false,
@@ -141,6 +152,15 @@ func DefaultConfig() *Config {
         SystemUIDMin:   1000,
         SystemUIDMax:   pidMax,
         IgnoreSystemLoad: false,
+        ServerRole:       "",  // Empty by default
+
+        // MCP Server
+        MCPEnabled:       false,
+        MCPTransport:     "stdio",
+        MCPHTTPPort:      1969,
+        MCPHTTPHost:      "",  // Empty = use default 0.0.0.0
+        MCPLogLevel:      "INFO",
+        MCPAllowWriteOps: false,
     }
 }
 
@@ -307,12 +327,19 @@ func setConfigField(cfg *Config, key, value string) error {
         default:
             cfg.EnablePrometheus = false
         }
+    case "PROMETHEUS_METRICS_BIND_HOST":
+        cfg.PrometheusMetricsBindHost = value
+    case "PROMETHEUS_METRICS_BIND_PORT":
+        if i, err := strconv.Atoi(value); err == nil {
+            cfg.PrometheusMetricsBindPort = i
+        }
+    // Backward compatibility: old variable names
+    case "PROMETHEUS_HOST":
+        cfg.PrometheusMetricsBindHost = value
     case "PROMETHEUS_PORT":
         if i, err := strconv.Atoi(value); err == nil {
-            cfg.PrometheusPort = i
+            cfg.PrometheusMetricsBindPort = i
         }
-    case "PROMETHEUS_HOST":
-        cfg.PrometheusHost = value
 
     // Prometheus TLS
     case "PROMETHEUS_TLS_ENABLED":
@@ -391,6 +418,41 @@ func setConfigField(cfg *Config, key, value string) error {
         default:
             cfg.IgnoreSystemLoad = false
         }
+
+    // Server Role
+    case "SERVER_ROLE":
+        cfg.ServerRole = value
+
+    // MCP Server
+    case "MCP_ENABLED":
+        switch strings.ToLower(value) {
+        case "true", "1", "yes", "on":
+            cfg.MCPEnabled = true
+        case "false", "0", "no", "off":
+            cfg.MCPEnabled = false
+        default:
+            cfg.MCPEnabled = false
+        }
+    case "MCP_TRANSPORT":
+        cfg.MCPTransport = strings.ToLower(value)
+    case "MCP_HTTP_PORT":
+        if i, err := strconv.Atoi(value); err == nil {
+            cfg.MCPHTTPPort = i
+        }
+    case "MCP_HTTP_HOST":
+        cfg.MCPHTTPHost = value
+    case "MCP_LOG_LEVEL":
+        cfg.MCPLogLevel = strings.ToUpper(value)
+    case "MCP_ALLOW_WRITE_OPS":
+        switch strings.ToLower(value) {
+        case "true", "1", "yes", "on":
+            cfg.MCPAllowWriteOps = true
+        case "false", "0", "no", "off":
+            cfg.MCPAllowWriteOps = false
+        default:
+            cfg.MCPAllowWriteOps = false
+        }
+
     default:
         return nil
     }

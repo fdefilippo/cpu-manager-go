@@ -162,8 +162,11 @@ func (m *Manager) RunControlCycle(ctx context.Context) error {
         return err
     }
 
-    // 5. Logga il risultato del ciclo
+    // 6. Registra lo storico del ciclo
     duration := time.Since(startTime)
+    m.recordControlCycle(decision, reason, metrics, duration)
+
+    // 5. Logga il risultato del ciclo
     m.logger.Info("Control cycle completed",
         "cycle_id", cycleID,
         "decision", decision,
@@ -707,4 +710,86 @@ func (m *Manager) ForceActivateLimits() error {
 // ForceDeactivateLimits disattiva forzatamente i limiti (per testing/admin).
 func (m *Manager) ForceDeactivateLimits() error {
     return m.deactivateLimits()
+}
+
+// GetConfig returns the current configuration
+func (m *Manager) GetConfig() *config.Config {
+    return m.cfg
+}
+
+// ControlCycleEntry represents a single control cycle entry in history
+type ControlCycleEntry struct {
+    Timestamp      time.Time `json:"timestamp"`
+    Decision       string    `json:"decision"`
+    Reason         string    `json:"reason"`
+    TotalCPUUsage  float64   `json:"total_cpu_usage"`
+    UserCPUUsage   float64   `json:"user_cpu_usage"`
+    ActiveUsers    int       `json:"active_users"`
+    LimitsActive   bool      `json:"limits_active"`
+    DurationMs     int64     `json:"duration_ms"`
+}
+
+// controlHistory stores recent control cycle entries
+type controlHistory struct {
+    entries []ControlCycleEntry
+    mu      sync.RWMutex
+    maxSize int
+}
+
+var controlHist = &controlHistory{
+    entries: make([]ControlCycleEntry, 0),
+    maxSize: 100,
+}
+
+// addControlHistoryEntry adds an entry to the control history
+func (m *Manager) addControlHistoryEntry(entry ControlCycleEntry) {
+    controlHist.mu.Lock()
+    defer controlHist.mu.Unlock()
+
+    controlHist.entries = append(controlHist.entries, entry)
+
+    // Keep only the last maxSize entries
+    if len(controlHist.entries) > controlHist.maxSize {
+        controlHist.entries = controlHist.entries[len(controlHist.entries)-controlHist.maxSize:]
+    }
+}
+
+// GetControlHistory returns the recent control cycle history
+func (m *Manager) GetControlHistory(limit int) []ControlCycleEntry {
+    controlHist.mu.RLock()
+    defer controlHist.mu.RUnlock()
+
+    if limit <= 0 || limit > len(controlHist.entries) {
+        limit = len(controlHist.entries)
+    }
+
+    // Return the most recent entries
+    start := len(controlHist.entries) - limit
+    if start < 0 {
+        start = 0
+    }
+
+    result := make([]ControlCycleEntry, limit)
+    copy(result, controlHist.entries[start:])
+    return result
+}
+
+// recordControlCycle records a control cycle in history
+func (m *Manager) recordControlCycle(decision, reason string, metrics *SystemMetrics, duration time.Duration) {
+    m.mu.RLock()
+    limitsActive := m.limitsActive
+    m.mu.RUnlock()
+
+    entry := ControlCycleEntry{
+        Timestamp:     time.Now(),
+        Decision:      decision,
+        Reason:        reason,
+        TotalCPUUsage: metrics.TotalCPUUsage,
+        UserCPUUsage:  metrics.TotalUserCPUUsage,
+        ActiveUsers:   len(metrics.ActiveUsers),
+        LimitsActive:  limitsActive,
+        DurationMs:    duration.Milliseconds(),
+    }
+
+    m.addControlHistoryEntry(entry)
 }

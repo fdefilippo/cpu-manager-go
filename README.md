@@ -23,6 +23,35 @@ Enterprise-grade dynamic CPU resource management tool using Linux cgroups v2. Au
 - **Graceful shutdown** with cleanup
 - **Complete man page** documentation
 - **Unit tests** for core packages
+- **MCP server** for AI assistant integration (Model Context Protocol)
+
+## 🤖 MCP Server (AI Integration)
+
+CPU Manager Go includes a built-in **Model Context Protocol (MCP)** server that exposes system metrics and control capabilities to AI assistants.
+
+### Features
+- **9 MCP Tools**: Query system status, user metrics, limits status, and manage CPU limits
+- **6 Resources**: REST-like URIs for system data (`cpu-manager://system/status`, `cpu-manager://users/{uid}/metrics`, etc.)
+- **3 Prompts**: Pre-built queries for system health, user analysis, and troubleshooting
+- **Multiple Transports**: stdio (for local AI clients), HTTP, and SSE
+
+### Quick Start
+```bash
+# /etc/cpu-manager.conf
+MCP_ENABLED=true
+MCP_TRANSPORT=stdio        # or http, sse
+MCP_ALLOW_WRITE_OPS=false  # Enable write operations with caution
+```
+
+### Example Usage
+An AI assistant can query:
+- "What's the current CPU usage?" → `get_system_status`
+- "Which users are using the most CPU?" → `get_user_metrics`
+- "Are CPU limits active?" → `get_limits_status`
+
+For complete documentation, see:
+- **[docs/MCP-README.md](docs/MCP-README.md)** - Usage guide and examples
+- **[docs/MCP-BLUEPRINT.md](docs/MCP-BLUEPRINT.md)** - Architecture and implementation details
 
 ## 📊 Prometheus Metrics
 

@@ -44,8 +44,8 @@ func TestDefaultConfig(t *testing.T) {
         {"CPUQuotaNormal", cfg.CPUQuotaNormal, "max 100000"},
         {"CPUQuotaLimited", cfg.CPUQuotaLimited, "50000 100000"},
         {"EnablePrometheus", cfg.EnablePrometheus, false},
-        {"PrometheusPort", cfg.PrometheusPort, 9101},
-        {"PrometheusHost", cfg.PrometheusHost, "127.0.0.1"},
+        {"PrometheusMetricsBindPort", cfg.PrometheusMetricsBindPort, 9101},
+        {"PrometheusMetricsBindHost", cfg.PrometheusMetricsBindHost, "127.0.0.1"},
         {"LogLevel", cfg.LogLevel, "INFO"},
         {"SystemUIDMin", cfg.SystemUIDMin, 1000},
         {"IgnoreSystemLoad", cfg.IgnoreSystemLoad, false},
@@ -275,8 +275,8 @@ PROMETHEUS_PORT=9102
     if !cfg.EnablePrometheus {
         t.Errorf("EnablePrometheus: got %v, expected true", cfg.EnablePrometheus)
     }
-    if cfg.PrometheusPort != 9102 {
-        t.Errorf("PrometheusPort: got %d, expected 9102", cfg.PrometheusPort)
+    if cfg.PrometheusMetricsBindPort != 9102 {
+        t.Errorf("PrometheusMetricsBindPort: got %d, expected 9102", cfg.PrometheusMetricsBindPort)
     }
 }
 
@@ -354,8 +354,8 @@ func TestLoadFromEnvironment(t *testing.T) {
     if !cfg.EnablePrometheus {
         t.Errorf("EnablePrometheus: got %v, expected true", cfg.EnablePrometheus)
     }
-    if cfg.PrometheusPort != 9103 {
-        t.Errorf("PrometheusPort: got %d, expected 9103", cfg.PrometheusPort)
+    if cfg.PrometheusMetricsBindPort != 9103 {
+        t.Errorf("PrometheusMetricsBindPort: got %d, expected 9103", cfg.PrometheusMetricsBindPort)
     }
 }
 

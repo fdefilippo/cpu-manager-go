@@ -135,8 +135,8 @@ func (r *Reloader) handlePrometheusConfigChange(newConfig *config.Config) error 
     // Nota: cambiare porta/host richiede restart del server HTTP
     // Per ora logghiamo solo il cambiamento
     r.logger.Info("Prometheus configuration changed",
-        "host", newConfig.PrometheusHost,
-        "port", newConfig.PrometheusPort,
+        "host", newConfig.PrometheusMetricsBindHost,
+        "port", newConfig.PrometheusMetricsBindPort,
         "enabled", newConfig.EnablePrometheus,
     )
 

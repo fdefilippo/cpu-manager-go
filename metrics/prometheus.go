@@ -104,13 +104,13 @@ func NewPrometheusExporter(cfg *config.Config) (*PrometheusExporter, error) {
   }
 
   logger.Info("Creating Prometheus exporter",
-  "host", cfg.PrometheusHost,
-  "port", cfg.PrometheusPort,
+  "host", cfg.PrometheusMetricsBindHost,
+  "port", cfg.PrometheusMetricsBindPort,
 )
 
 // Verifica che la porta sia valida
-if cfg.PrometheusPort <= 0 || cfg.PrometheusPort > 65535 {
-  return nil, fmt.Errorf("invalid Prometheus port: %d", cfg.PrometheusPort)
+if cfg.PrometheusMetricsBindPort <= 0 || cfg.PrometheusMetricsBindPort > 65535 {
+  return nil, fmt.Errorf("invalid Prometheus port: %d", cfg.PrometheusMetricsBindPort)
 }
 
 exp := &PrometheusExporter{
@@ -908,7 +908,7 @@ func (exp *PrometheusExporter) Start(ctx context.Context) error {
   // Root endpoint
   mux.HandleFunc("/", exp.rootHandler)
 
-  addr := fmt.Sprintf("%s:%d", exp.cfg.PrometheusHost, exp.cfg.PrometheusPort)
+  addr := fmt.Sprintf("%s:%d", exp.cfg.PrometheusMetricsBindHost, exp.cfg.PrometheusMetricsBindPort)
   exp.server = &http.Server{
     Addr:    addr,
     Handler: mux,
@@ -1034,5 +1034,5 @@ func (exp *PrometheusExporter) GetMetricsEndpoint() string {
   if exp == nil {
     return ""
   }
-  return fmt.Sprintf("http://%s:%d/metrics", exp.cfg.PrometheusHost, exp.cfg.PrometheusPort)
+  return fmt.Sprintf("http://%s:%d/metrics", exp.cfg.PrometheusMetricsBindHost, exp.cfg.PrometheusMetricsBindPort)
 }

@@ -6,7 +6,6 @@
 # ========================
 CGROUP_ROOT=/sys/fs/cgroup
 SCRIPT_CGROUP_BASE=cpu_manager
-LOG_FILE=/var/log/cpu-manager.log
 CREATED_CGROUPS_FILE=/var/run/cpu-manager/cgroups.txt
 METRICS_CACHE_FILE=/var/run/cpu-manager/metrics.cache
 
@@ -36,9 +35,10 @@ CPU_QUOTA_LIMITED="50000 100000"
 # ========================
 # PROMETHEUS
 # ========================
-ENABLE_PROMETHEUS=true
-PROMETHEUS_PORT=9100
-PROMETHEUS_HOST=192.168.1.7
+ENABLE_PROMETHEUS=false              # Enable metrics export
+# PROMETHEUS_METRICS_BIND_HOST=0.0.0.0  # Bind address (default: 0.0.0.0 - all interfaces)
+# PROMETHEUS_METRICS_BIND_PORT=1974     # Port for metrics endpoint (default: 1974)
+# Metrics available at: http://HOST:PORT/metrics
 
 # Prometheus TLS/HTTPS (optional)
 PROMETHEUS_TLS_ENABLED=false
@@ -60,9 +60,15 @@ PROMETHEUS_JWT_EXPIRY=3600
 # ========================
 # LOGGING
 # ========================
-LOG_LEVEL=DEBUG
-LOG_MAX_SIZE=10485760
-USE_SYSLOG=true
+# Livelli di log disponibili:
+#   DEBUG - Messaggi dettagliati per troubleshooting
+#   INFO  - Informazioni operative normali (default consigliato)
+#   WARN  - Solo avvisi ed errori
+#   ERROR - Solo errori
+LOG_LEVEL=INFO
+LOG_MAX_SIZE=10485760        # Maximum log file size (10MB)
+USE_SYSLOG=false             # true: usa syslog di sistema, false: usa file
+LOG_FILE=/var/log/cpu-manager.log
 
 # ========================
 # SYSTEM
@@ -71,9 +77,43 @@ MIN_SYSTEM_CORES=1
 SYSTEM_UID_MIN=1000
 # SYSTEM_UID_MAX viene letto automaticamente da /proc/sys/kernel/pid_max
 
-# ========================
 # LOAD AVERAGE HANDLING
 # ========================
 # false: non attiva limiti se il sistema è già sotto carico (default conservativo)
 # true: attiva limiti anche se il sistema è sotto carico (isolamento garantito)
 IGNORE_SYSTEM_LOAD=true
+
+# ========================
+# SERVER ROLE
+# ========================
+# Opzionale: descrive il ruolo di questo server per identificazione nei report MCP
+# Esempi: database, web-frontend, batch, application, cache, api-gateway, etc.
+# SERVER_ROLE=database
+
+# ========================
+# MCP SERVER (Model Context Protocol)
+# ========================
+# Enable MCP server for AI assistant integration
+MCP_ENABLED=false
+
+# Transport: stdio, http
+# stdio: Standard input/output (for local MCP clients like Claude Desktop)
+# http: HTTP POST endpoint (for AnythingLLM and other remote clients)
+MCP_TRANSPORT=stdio
+
+# HTTP transport settings (only for http transport)
+# MCP_HTTP_HOST=0.0.0.0      # Bind address (default: all interfaces)
+# MCP_HTTP_PORT=1969         # Port for MCP endpoint (default: 1969)
+# MCP endpoint available at: http://HOST:PORT/mcp
+
+# MCP log level
+# Livelli disponibili: DEBUG, INFO, WARN, ERROR
+# Se non specificato, usa lo stesso livello di LOG_LEVEL
+MCP_LOG_LEVEL=INFO
+
+# Allow write operations (activate/deactivate limits via MCP)
+# WARNING: Enable only if you trust all MCP clients
+MCP_ALLOW_WRITE_OPS=false
+
+# Optional authentication token for HTTP transport
+# MCP_AUTH_TOKEN=your-secret-token-here
