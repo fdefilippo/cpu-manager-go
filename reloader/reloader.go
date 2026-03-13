@@ -97,10 +97,13 @@ func (r *Reloader) OnConfigChange(newConfig *config.Config) error {
         )
     }
 
-    // 5. Metrics collector (aggiorna cache TTL)
+    // 5. Metrics collector (aggiorna cache TTL e exclude list)
     if r.metricsCollector != nil {
-        r.metricsCollector.ClearCache() // Pulisce cache esistente
-        r.logger.Debug("Metrics collector cache cleared")
+        r.metricsCollector.UpdateConfig(newConfig)  // Aggiorna la configurazione
+        r.logger.Info("Metrics collector configuration updated",
+            "cache_ttl", newConfig.MetricsCacheTTL,
+            "exclude_list", newConfig.UserExcludeList,
+        )
     }
 
     if len(errors) > 0 {

@@ -127,6 +127,15 @@ MIN_SYSTEM_CORES=2           # Minimum cores reserved for system
 SYSTEM_UID_MIN=1000          # Minimum UID for non\-system users
 SYSTEM_UID_MAX=60000         # Maximum UID (default: pid_max)
 
+# USER INCLUDE LIST (regex patterns, comma-separated)
+# Only users matching these patterns are monitored
+# USER_INCLUDE_LIST=^www.*,^apache.*    # Web users only
+# USER_INCLUDE_LIST=francesco,www-data  # Specific users
+
+# USER EXCLUDE LIST (usernames, comma-separated)
+# These users are excluded from CPU limits
+# USER_EXCLUDE_LIST=francesco,mysql     # Exclude specific users
+
 # LOAD AVERAGE CHECKING
 IGNORE_SYSTEM_LOAD=false     # If true, ignores load average in decisions
 

@@ -53,11 +53,19 @@ mcp/
 | `get_user_metrics` | Get metrics for specific user(s) | `uids` (optional), `username` (optional) | Per-user CPU%, memory, process count |
 | `get_active_users` | List all active non-system users | None | List of UIDs with usernames |
 | `get_limits_status` | Check if CPU limits are currently active | None | Boolean, applied time, affected users |
-| `activate_limits` | Manually activate CPU limits | `force` (bool) | Success/failure, affected users |
-| `deactivate_limits` | Manually deactivate CPU limits | None | Success/failure |
 | `get_cgroup_info` | Get cgroup details for a user | `uid` (required) | Cgroup path, CPU quota, weight |
 | `get_configuration` | Get current configuration | None | Full config as JSON |
 | `get_control_history` | Get recent control cycle history | `limit` (int, optional) | Last N control cycles |
+| `get_cpu_report` | Generate comprehensive CPU report | None | Formatted text report |
+| `get_mem_report` | Generate comprehensive memory report | None | Formatted text report |
+| `get_user_filters` | Get current user filter configurations | None | Include/exclude lists |
+| `set_user_exclude_list` | Set users to exclude (regex) | `patterns` ([]string), `reload` (bool) | Success, previous/new values |
+| `set_user_include_list` | Set users to include (regex) | `patterns` ([]string), `reload` (bool) | Success, previous/new values |
+| `validate_user_filter_pattern` | Validate regex pattern | `pattern` (string), `type` (string) | Valid, test matches |
+| `activate_limits` | Manually activate CPU limits | `force` (bool) | Success/failure, affected users |
+| `deactivate_limits` | Manually deactivate CPU limits | None | Success/failure |
+
+**Write Operations:** Tools marked with * require `MCP_ALLOW_WRITE_OPS=true`
 
 ### 2. Resources (Data AI can read)
 
@@ -299,7 +307,16 @@ AI (via MCP):
 - [x] Formatted text output with structured data
 - [x] Hostname identification for multi-server environments
 
-### Phase 5: Advanced Features (Future)
+### Phase 5: User Filter Management ✅ COMPLETED (v1.11.0)
+- [x] `get_user_filters` - Get current filter configurations
+- [x] `set_user_exclude_list` - Set exclude list with regex support
+- [x] `set_user_include_list` - Set include list with regex support
+- [x] `validate_user_filter_pattern` - Validate regex patterns
+- [x] Automatic configuration backup with timestamp
+- [x] Atomic save with rollback on error
+- [x] Automatic config reload trigger
+
+### Phase 6: Advanced Features (Future)
 - [ ] Real-time notifications
 - [ ] Metrics streaming
 - [ ] Enhanced authorization
@@ -311,18 +328,19 @@ AI (via MCP):
 | File | Action | Description |
 |------|--------|-------------|
 | `mcp/server.go` | ✅ Created | Main MCP server implementation with HTTP logging middleware |
-| `mcp/tools.go` | ✅ Created | Tool definitions and handlers (11 tools including reports) |
+| `mcp/tools.go` | ✅ Created | Tool definitions and handlers (15 tools including reports and user filters) |
 | `mcp/resources.go` | ✅ Created | Resource definitions and handlers |
 | `mcp/config.go` | ✅ Created | MCP configuration |
 | `mcp/server_test.go` | ✅ Created | Unit tests |
-| `config/config.go` | ✅ Modified | Added MCP config fields |
-| `config/cpu-manager.conf.example` | ✅ Modified | Added MCP example config |
+| `config/config.go` | ✅ Modified | Added MCP config fields, UserFilter methods, SaveToFile(), backup mechanism |
+| `config/cpu-manager.conf.example` | ✅ Modified | Added MCP example config, USER_INCLUDE_LIST, USER_EXCLUDE_LIST |
 | `state/manager.go` | ✅ Modified | Added GetConfig, GetControlHistory methods |
 | `main.go` | ✅ Modified | Initialize MCP server, fixed logger initialization |
 | `go.mod` | ✅ Modified | Added MCP SDK dependency |
 | `docs/MCP-BLUEPRINT.md` | ✅ Created | Architecture and implementation plan |
-| `docs/MCP-README.md` | ✅ Created | Usage guide with examples |
-| `CHANGELOG.md` | ✅ Modified | Version 1.3.0 with MCP features |
+| `docs/MCP-README.md` | ✅ Created | Usage guide with examples (updated with user filter tools) |
+| `docs/TECHNICAL-SPECIFICATION.md` | ✅ Modified | Added user filter management documentation |
+| `CHANGELOG.md` | ✅ Modified | Versions 1.3.0-1.11.0 with MCP features and user filter management |
 | `README.md` | ✅ Modified | Added MCP server section |
 
 ## References

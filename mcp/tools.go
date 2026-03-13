@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -580,6 +581,315 @@ Utenti limitati: %d su %d
 			}, nil
 		})
 	}
+
+	// set_user_exclude_list - registered manually with explicit schema
+	s.mcpServer.AddTool(&mcp.Tool{
+		Name:        "set_user_exclude_list",
+		Description: "Set the list of users to exclude from CPU limits (regex patterns supported)",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"patterns": map[string]any{
+					"type": "array",
+					"items": map[string]any{"type": "string"},
+					"description": "List of regex patterns for users to exclude",
+				},
+				"reload": map[string]any{
+					"type": "boolean",
+					"description": "Automatically reload configuration after change",
+					"default": true,
+				},
+			},
+			"required": []string{"patterns"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Unmarshal arguments from json.RawMessage
+		var args map[string]interface{}
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid parameters: %w", err)
+		}
+		
+		// Extract patterns
+		patternsRaw, ok := args["patterns"].([]interface{})
+		if !ok {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid patterns parameter")
+		}
+		
+		// Convert []interface{} to []string
+		patterns := make([]string, len(patternsRaw))
+		for i, p := range patternsRaw {
+			if s, ok := p.(string); ok {
+				patterns[i] = s
+			} else {
+				return &mcp.CallToolResult{}, fmt.Errorf("pattern must be string")
+			}
+		}
+		
+		// Get reload parameter (default true)
+		reload := true
+		if reloadRaw, ok := args["reload"].(bool); ok {
+			reload = reloadRaw
+		}
+		
+		// Check if write operations are allowed
+		if !s.cfg.AllowWriteOps {
+			return &mcp.CallToolResult{}, fmt.Errorf("write operations not allowed. Set MCP_ALLOW_WRITE_OPS=true")
+		}
+		
+		// Get current config
+		cfg := s.stateManager.GetConfig()
+		
+		// Save previous value
+		previousValue := make([]string, len(cfg.UserExcludeList))
+		copy(previousValue, cfg.UserExcludeList)
+		
+		// Set new exclude list
+		_, err := cfg.SetUserExcludeList(patterns, cfg.ConfigFile, reload)
+		if err != nil {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: toJSON(map[string]any{
+						"success": false,
+						"error": err.Error(),
+						"previous_value": previousValue,
+					})},
+				},
+			}, nil
+		}
+		
+		// Trigger reload if requested
+		if reload {
+			time.Sleep(1 * time.Second)
+		}
+		
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: toJSON(map[string]any{
+					"success": true,
+					"message": "User exclude list updated successfully",
+					"previous_value": previousValue,
+					"new_value": patterns,
+					"reload_triggered": reload,
+				})},
+			},
+			StructuredContent: map[string]any{
+				"success": true,
+				"previous_value": previousValue,
+				"new_value": patterns,
+				"reload_triggered": reload,
+			},
+		}, nil
+	})
+
+	// set_user_include_list - registered manually with explicit schema
+	s.mcpServer.AddTool(&mcp.Tool{
+		Name:        "set_user_include_list",
+		Description: "Set the list of users to include in monitoring (regex patterns supported)",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"patterns": map[string]any{
+					"type": "array",
+					"items": map[string]any{"type": "string"},
+					"description": "List of regex patterns for users to include",
+				},
+				"reload": map[string]any{
+					"type": "boolean",
+					"description": "Automatically reload configuration after change",
+					"default": true,
+				},
+			},
+			"required": []string{"patterns"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Unmarshal arguments from json.RawMessage
+		var args map[string]interface{}
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid parameters: %w", err)
+		}
+		
+		// Extract patterns
+		patternsRaw, ok := args["patterns"].([]interface{})
+		if !ok {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid patterns parameter")
+		}
+		
+		// Convert []interface{} to []string
+		patterns := make([]string, len(patternsRaw))
+		for i, p := range patternsRaw {
+			if s, ok := p.(string); ok {
+				patterns[i] = s
+			} else {
+				return &mcp.CallToolResult{}, fmt.Errorf("pattern must be string")
+			}
+		}
+		
+		// Get reload parameter (default true)
+		reload := true
+		if reloadRaw, ok := args["reload"].(bool); ok {
+			reload = reloadRaw
+		}
+		
+		// Check if write operations are allowed
+		if !s.cfg.AllowWriteOps {
+			return &mcp.CallToolResult{}, fmt.Errorf("write operations not allowed. Set MCP_ALLOW_WRITE_OPS=true")
+		}
+		
+		// Get current config
+		cfg := s.stateManager.GetConfig()
+		
+		// Save previous value
+		previousValue := make([]string, len(cfg.UserIncludeList))
+		copy(previousValue, cfg.UserIncludeList)
+		
+		// Set new include list
+		_, err := cfg.SetUserIncludeList(patterns, cfg.ConfigFile, reload)
+		if err != nil {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: toJSON(map[string]any{
+						"success": false,
+						"error": err.Error(),
+						"previous_value": previousValue,
+					})},
+				},
+			}, nil
+		}
+		
+		// Trigger reload if requested
+		if reload {
+			time.Sleep(1 * time.Second)
+		}
+		
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: toJSON(map[string]any{
+					"success": true,
+					"message": "User include list updated successfully",
+					"previous_value": previousValue,
+					"new_value": patterns,
+					"reload_triggered": reload,
+				})},
+			},
+			StructuredContent: map[string]any{
+				"success": true,
+				"previous_value": previousValue,
+				"new_value": patterns,
+				"reload_triggered": reload,
+			},
+		}, nil
+	})
+
+	// get_user_filters - registered manually with explicit empty schema
+	s.mcpServer.AddTool(&mcp.Tool{
+		Name:        "get_user_filters",
+		Description: "Get current user include and exclude filter configurations",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		cfg := s.stateManager.GetConfig()
+		
+		result := map[string]any{
+			"user_include_list": cfg.UserIncludeList,
+			"user_exclude_list": cfg.UserExcludeList,
+			"config_file": cfg.ConfigFile,
+		}
+		
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: toJSON(result)},
+			},
+			StructuredContent: result,
+		}, nil
+	})
+
+	// validate_user_filter_pattern - registered manually with explicit schema
+	s.mcpServer.AddTool(&mcp.Tool{
+		Name:        "validate_user_filter_pattern",
+		Description: "Validate if a regex pattern is valid and show example matches",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"pattern": map[string]any{
+					"type": "string",
+					"description": "Regex pattern to validate",
+				},
+				"type": map[string]any{
+					"type": "string",
+					"description": "Filter type: 'include' or 'exclude'",
+					"enum": []string{"include", "exclude"},
+				},
+			},
+			"required": []string{"pattern"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Unmarshal arguments from json.RawMessage
+		var args map[string]interface{}
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid parameters: %w", err)
+		}
+		
+		// Extract pattern
+		pattern, ok := args["pattern"].(string)
+		if !ok {
+			return &mcp.CallToolResult{}, fmt.Errorf("invalid or missing pattern parameter")
+		}
+		
+		// Get type parameter (optional)
+		filterType := "unspecified"
+		if typeRaw, ok := args["type"].(string); ok {
+			filterType = typeRaw
+		}
+		
+		// Validate regex pattern
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: toJSON(map[string]any{
+						"valid": false,
+						"error": err.Error(),
+					})},
+				},
+				StructuredContent: map[string]any{
+					"valid": false,
+					"error": err.Error(),
+				},
+			}, nil
+		}
+		
+		// Test against some example usernames
+		testUsers := []string{"francesco", "www-data", "mysql", "nobody", "root", 
+			"test-user", "dev-web", "app-prod", "svc-db", "admin"}
+		
+		matches := make([]string, 0)
+		for _, user := range testUsers {
+			if compiled.MatchString(user) {
+				matches = append(matches, user)
+			}
+		}
+		
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: toJSON(map[string]any{
+					"valid": true,
+					"pattern": pattern,
+					"type": filterType,
+					"test_matches": matches,
+					"match_count": len(matches),
+				})},
+			},
+			StructuredContent: map[string]any{
+				"valid": true,
+				"pattern": pattern,
+				"type": filterType,
+				"test_matches": matches,
+				"match_count": len(matches),
+			},
+		}, nil
+	})
 }
 
 // handleGetSystemStatus handles get_system_status tool requests

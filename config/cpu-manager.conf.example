@@ -78,17 +78,47 @@ SYSTEM_UID_MIN=1000
 # SYSTEM_UID_MAX viene letto automaticamente da /proc/sys/kernel/pid_max
 
 # ========================
-# USER WHITELIST (Optional)
+# USER INCLUDE LIST (Optional, Regex Support)
 # ========================
-# Se specificata, limita il monitoraggio e l'applicazione dei limiti solo
-# agli utenti elencati. Se vuota o non specificata, tutti gli utenti non-system
-# (UID >= SYSTEM_UID_MIN) sono considerati.
-# Formato: lista di username separati da virgola, senza spazi
+# Se specificata, INCLUDE nel monitoraggio SOLO gli utenti che corrispondono
+# ai pattern regex elencati. Se vuota o non specificata, tutti gli utenti
+# non-system (UID >= SYSTEM_UID_MIN) sono inclusi.
+# Formato: lista di pattern regex separati da virgola, senza spazi
 # Esempi:
-#   USER_WHITELIST=francesco                    # Solo un utente
-#   USER_WHITELIST=alice,bob,charlie           # Multipli utenti
-#   USER_WHITELIST=www-data,mysql,redis        # Utenti di servizio
-# USER_WHITELIST=francesco,www-data
+#   USER_INCLUDE_LIST=francesco                    # Solo francesco
+#   USER_INCLUDE_LIST=^www.*,^apache.*             # Utenti web (regex)
+#   USER_INCLUDE_LIST=^svc-.*,^app-.*              # Utenti servizio (regex)
+#   USER_INCLUDE_LIST=francesco,www-data,mysql     # Utenti specifici
+#   USER_INCLUDE_LIST=                             # Vuoto = TUTTI gli utenti (default)
+#
+# NOTA: Se la riga è assente o commentata, tutti gli utenti non-system sono inclusi.
+# USER_INCLUDE_LIST=
+
+# ========================
+# USER EXCLUDE LIST (Optional, Regex Support)
+# ========================
+# Se specificata, ESCLUDE gli utenti elencati dal monitoraggio e dall'applicazione
+# dei limiti CPU. Se vuota o non specificata, tutti gli utenti non-system
+# (UID >= SYSTEM_UID_MIN) possono essere limitati.
+# Formato: lista di pattern regex separati da virgola, senza spazi
+# Esempi:
+#   USER_EXCLUDE_LIST=francesco                    # Francesco NON viene limitato
+#   USER_EXCLUDE_LIST=^www-.*,^test-.*             # Esclude utenti web e test (regex)
+#   USER_EXCLUDE_LIST=^svc-.*,^app-.*              # Esclude utenti servizio (regex)
+#   USER_EXCLUDE_LIST=francesco,www-data,mysql     # Utenti specifici esclusi
+#   USER_EXCLUDE_LIST=                             # Vuoto = NESSUN utente escluso (default)
+#
+# NOTA: Se la riga è assente o commentata, tutti gli utenti non-system possono essere limitati.
+# USER_EXCLUDE_LIST=
+
+# ========================
+# PROCESS EXCLUSION (Automatic)
+# ========================
+# I seguenti processi di sistema sono AUTOMATICAMENTE esclusi dai limiti CPU:
+# systemd, dbus-daemon, polkitd, NetworkManager, sshd, cron, rsyslogd,
+# dockerd, containerd, nginx, apache2, mysqld, postgres, redis-server,
+# e molti altri processi di infrastruttura.
+# La lista completa è definita nel codice (config/config.go - IsProcessExcluded)
 
 # LOAD AVERAGE HANDLING
 # ========================

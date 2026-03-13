@@ -5,6 +5,320 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
+## [1.11.0] - 2026-03-13
+
+### Aggiunto
+
+#### MCP User Filter Management
+Nuovi tool MCP per gestire dinamicamente USER_INCLUDE_LIST e USER_EXCLUDE_LIST:
+
+**Tool: `set_user_exclude_list`**
+- Imposta la lista di utenti da escludere dai limiti CPU
+- Input: `patterns` (array di regex), `reload` (boolean, default=true)
+- Output: `success`, `previous_value`, `new_value`, `reload_triggered`
+- Crea backup automatico con timestamp
+- Triggera reload automatico della configurazione
+
+**Tool: `set_user_include_list`**
+- Imposta la lista di pattern per includere utenti nel monitoraggio
+- Input: `patterns` (array di regex), `reload` (boolean, default=true)
+- Output: `success`, `previous_value`, `new_value`, `reload_triggered`
+- Crea backup automatico con timestamp
+- Triggera reload automatico della configurazione
+
+**Tool: `get_user_filters`**
+- Ottiene le configurazioni correnti di include/exclude list
+- Output: `user_include_list`, `user_exclude_list`, `config_file`
+
+**Tool: `validate_user_filter_pattern`**
+- Valida se un pattern regex è valido
+- Input: `pattern` (string), `type` ("include" o "exclude")
+- Output: `valid`, `pattern`, `type`, `test_matches`, `match_count`
+- Testa il pattern contro utenti di esempio
+
+#### Sicurezza
+- Tutti i tool di scrittura richiedono `MCP_ALLOW_WRITE_OPS=true`
+- Backup automatico prima di ogni modifica (formato: `cpu-manager.conf.backup_YYYYMMDD_HHMMSS`)
+- Salvataggio atomico (write temp file + rename)
+- Rollback automatico in caso di errore
+
+### Modificato
+
+#### Pacchetto config
+- `config.go`: Aggiunti metodi `SetUserExcludeList()`, `SetUserIncludeList()`, `SaveToFile()`
+- `config.go`: Implementato backup automatico con timestamp
+- `config.go`: Implementato salvataggio atomico della configurazione
+
+#### Pacchetto mcp
+- `tools.go`: Implementati 4 nuovi tool per user filter management
+- `tools.go`: Aggiunto import per `regexp`
+
+### Esempi di Utilizzo
+
+```bash
+# Impostare exclude list
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"tools/call",
+    "params":{
+      "name":"set_user_exclude_list",
+      "arguments":{"patterns":["^test-.*","^dev-.*"],"reload":true}
+    },
+    "id":1
+  }'
+
+# Ottenere filtri correnti
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"tools/call",
+    "params":{
+      "name":"get_user_filters",
+      "arguments":{}
+    },
+    "id":2
+  }'
+
+# Validare pattern
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"tools/call",
+    "params":{
+      "name":"validate_user_filter_pattern",
+      "arguments":{"pattern":"^www.*","type":"exclude"}
+    },
+    "id":3
+  }'
+```
+
+---
+
+## [1.10.1] - 2026-03-13
+
+### Corretto
+
+#### Config Watcher Fix
+- **Aggiunto controllo periodico** della configurazione (ogni 30 secondi)
+- Risolto problema: modifiche al file non rilevate da fsnotify
+- Alcuni editor di testo non triggerano correttamente gli eventi fsnotify
+- Il controllo periodico garantisce che le modifiche siano sempre rilevate
+
+**Log Migliorato:**
+```
+[INFO] Config change detected via periodic check, reloading
+[INFO] Configuration reloaded successfully
+[INFO] Metrics collector configuration updated exclude_list=[francesco,nobody,zabbix,mysql]
+```
+
+---
+
+## [1.10.0] - 2026-03-12
+
+### Aggiunto
+
+#### Supporto Regex per USER_EXCLUDE_LIST
+- **USER_EXCLUDE_LIST** ora supporta pattern regex (come USER_INCLUDE_LIST)
+- Pattern multipli separati da virgola
+- Validazione pattern all'avvio (errore se regex invalida)
+- Backward compatibility: nomi utente esatti funzionano ancora
+
+**Esempi di Utilizzo:**
+```bash
+# Escludi utenti specifici (backward compatible)
+USER_EXCLUDE_LIST=francesco,www-data,mysql
+
+# Pattern regex per escludere utenti web
+USER_EXCLUDE_LIST=^www-.*,^test-.*,^dev-.*
+
+# Pattern per escludere utenti servizio
+USER_EXCLUDE_LIST=^svc-.*,^app-.*
+
+# Combinazione di pattern
+USER_EXCLUDE_LIST=^test-.*,^dev-.*,francesco
+```
+
+### Cambiato
+
+#### Documentazione Aggiornata
+- `config/cpu-manager.conf.example`: Documentato supporto regex per USER_EXCLUDE_LIST
+- Esempi aggiornati con pattern regex
+
+### Comportamento
+
+| Configurazione | Risultato |
+|---------------|-----------|
+| `USER_EXCLUDE_LIST=` (vuoto) | NESSUN utente è escluso |
+| `USER_EXCLUDE_LIST=francesco` | francesco è escluso (match esatto) |
+| `USER_EXCLUDE_LIST=^www-.*` | Tutti gli utenti che iniziano con "www-" sono esclusi |
+| `USER_EXCLUDE_LIST=^test-.*,^dev-.*` | Utenti che iniziano con "test-" O "dev-" sono esclusi |
+
+---
+
+## [1.9.0] - 2026-03-12
+
+### Aggiunto
+
+#### USER_INCLUDE_LIST con Supporto Regex
+- Nuova variabile `USER_INCLUDE_LIST` per filtrare utenti tramite pattern regex
+- Supporto espressioni regolari complete (sintassi Go `regexp`)
+- Pattern multipli separati da virgola
+- Validazione pattern all'avvio (errore se regex invalida)
+
+**Esempi di Utilizzo:**
+```bash
+# Solo utenti specifici
+USER_INCLUDE_LIST=francesco,www-data,mysql
+
+# Pattern regex per utenti web
+USER_INCLUDE_LIST=^www.*,^apache.*,^nginx.*
+
+# Pattern per utenti servizio
+USER_INCLUDE_LIST=^svc-.*,^app-.*
+
+# Combinazione di pattern
+USER_INCLUDE_LIST=^web.*,^app.*,francesco
+```
+
+#### Log Migliorato
+- `GetActiveUsers()` ora logga include_list e exclude_list
+- Debug più semplice del filtraggio utenti
+
+### Comportamento
+
+| Configurazione | Risultato |
+|---------------|-----------|
+| `USER_INCLUDE_LIST=` (vuoto) | TUTTI gli utenti sono inclusi |
+| `USER_INCLUDE_LIST=francesco` | Solo francesco è incluso |
+| `USER_INCLUDE_LIST=^www.*` | Solo utenti che iniziano con "www" |
+| `USER_INCLUDE_LIST=^svc-.*,^app-.*` | Utenti che iniziano con "svc-" O "app-" |
+
+### Precedenza
+
+Se entrambe le liste sono specificate:
+1. **USER_INCLUDE_LIST** filtra gli utenti inclusi (whitelist)
+2. **USER_EXCLUDE_LIST** rimuove utenti dall'insieme (blacklist)
+
+Esempio:
+```bash
+USER_INCLUDE_LIST=^www.*     # Include tutti gli utenti www-*
+USER_EXCLUDE_LIST=www-test   # Ma esclude www-test
+# Risultato: www-prod, www-dev inclusi, www-test escluso
+```
+
+---
+
+## [1.8.0] - 2026-03-12
+
+### Cambiato
+
+#### USER_EXCLUDE_LIST (Breaking Change)
+- **Rinominato**: `USER_WHITELIST` → `USER_EXCLUDE_LIST`
+- **Comportamento invertito**: La lista ora ESCLUDE gli utenti dai limiti
+- **Retrocompatibilità**: `USER_WHITELIST` funziona ancora ma è deprecato
+
+### Comportamento
+
+```bash
+# Vecchio comportamento (USER_WHITELIST):
+USER_WHITELIST=francesco  # → SOLO francesco limitato
+
+# Nuovo comportamento (USER_EXCLUDE_LIST):
+USER_EXCLUDE_LIST=francesco  # → francesco NON viene limitato
+```
+
+### Aggiunto
+
+#### Documentazione Migliorata
+- File di esempio aggiornato con `USER_EXCLUDE_LIST`
+- Commenti chiari sul comportamento
+- Esempi di utilizzo pratici
+
+### Esempio di Utilizzo
+
+```bash
+# /etc/cpu-manager.conf
+
+# Escludi francesco dai limiti (non verrà mai limitato)
+USER_EXCLUDE_LIST=francesco
+
+# Escludi multipli utenti
+USER_EXCLUDE_LIST=francesco,www-data,mysql
+
+# Nessun utente escluso (tutti possono essere limitati)
+# USER_EXCLUDE_LIST=
+```
+
+---
+
+## [1.7.0] - 2026-03-12
+
+### Aggiunto
+
+#### Process Exclusion (Blacklist Automatica)
+- Nuova funzione `IsProcessExcluded()` in `config/config.go`
+- Lista di processi di sistema automaticamente esclusi dai limiti CPU:
+  - **System**: systemd, dbus-daemon, polkitd, udisks2d
+  - **Network**: NetworkManager, wpa_supplicant, sshd
+  - **System Services**: cron, rsyslogd, auditd, firewalld
+  - **Container**: dockerd, containerd, kubelet, lxcfs
+  - **Web Server**: nginx, apache2, httpd, php-fpm
+  - **Database**: mysqld, mariadbd, postgres, mongod, redis-server
+  - **Mail**: postfix, master
+  - **Monitoring**: zabbix_agentd, prometheus, node_exporter, telegraf, grafana-server
+  - **Virtualizzazione**: qemu-system, libvirtd, vmtoolsd, VBoxService
+  - **Desktop**: gdm, gnome-shell, lightdm, sddm
+  - **Altro**: cupsd, avahi-daemon, bluetoothd, chronyd, smartd
+- I processi esclusi non vengono conteggiati nel calcolo della CPU usage
+- Gli utenti con solo processi esclusi non vengono limitati
+
+### Corretto
+
+#### Whitelist Fix
+- **Risolto**: `USER_WHITELIST=` vuoto ora include correttamente tutti gli utenti
+- **Risolto**: Whitelist assente o commentata ora include tutti gli utenti
+- Documentato comportamento nel file di esempio
+- La whitelist ora funziona come previsto:
+  - `USER_WHITELIST=` (vuoto) → TUTTI gli utenti
+  - `# USER_WHITELIST=` (commentato) → TUTTI gli utenti
+  - `USER_WHITELIST=alice,bob` → Solo alice e bob
+
+### Modificato
+
+#### Metrics Collector
+- `GetActiveUsers()`: Esclude utenti con solo processi nella blacklist
+- `GetUserCPUUsage()`: Esclude processi nella blacklist dal calcolo CPU
+- Logging migliorato per debug whitelist e process exclusion
+
+#### Configurazione
+- `config/cpu-manager.conf.example`: Documentata whitelist e process exclusion
+- `config/config.go`: Aggiunta funzione `IsProcessExcluded()`
+
+### Esempio di Utilizzo
+
+```bash
+# /etc/cpu-manager.conf
+
+# Whitelist vuota = tutti gli utenti (systemd, dbus-daemon etc. sono comunque esclusi)
+USER_WHITELIST=
+
+# Oppure whitelist specifica (processi di sistema comunque esclusi)
+USER_WHITELIST=francesco,www-data
+
+# I seguenti processi NON saranno mai limitati, anche se di utenti nella whitelist:
+# - systemd (UID 0 o 1000)
+# - dbus-daemon (UID 1000)
+# - NetworkManager (UID 0)
+# - sshd (UID 0)
+# - etc.
+```
+
+---
+
 ## [1.6.0] - 2026-03-12
 
 ### Aggiunto
@@ -56,6 +370,8 @@ e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/)
 #### Bug Fix
 - Risolto problema parsing configurazione con commenti inline
 - Risolto problema "Prometheus exporter disabled" con commenti nel file di config
+- **Fix cleanup cgroup**: Ora rimuove correttamente il cgroup condiviso "limited" durante lo shutdown
+- **Fix graceful shutdown**: Gli utenti vengono correttamente rimossi dai cgroup quando CPU Manager viene fermato
 
 ### Comportamento
 
@@ -546,6 +862,12 @@ Il formato delle versioni è `MAJOR.MINOR.PATCH`:
 
 ## Link
 
+- [1.11.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.10.1...v1.11.0
+- [1.10.1]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.10.0...v1.10.1
+- [1.10.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.9.0...v1.10.0
+- [1.9.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.8.0...v1.9.0
+- [1.8.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.7.0...v1.8.0
+- [1.7.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.6.0...v1.7.0
 - [1.6.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.5.0...v1.6.0
 - [1.5.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.4.0...v1.5.0
 - [1.4.0]: https://github.com/fdefilippo/cpu-manager-go/compare/v1.3.0...v1.4.0

@@ -13,7 +13,7 @@ The MCP server exposes CPU Manager Go functionality to AI assistants and MCP-com
 
 ## Features
 
-### Tools (11 available)
+### Tools (15 available)
 
 | Tool | Description | Write Operation |
 |------|-------------|-----------------|
@@ -26,6 +26,10 @@ The MCP server exposes CPU Manager Go functionality to AI assistants and MCP-com
 | `get_control_history` | Get recent control cycle history | No |
 | `get_cpu_report` | **Generate comprehensive CPU usage report** | No |
 | `get_mem_report` | **Generate comprehensive memory usage report** | No |
+| `get_user_filters` | **Get current user include/exclude filters** | No |
+| `set_user_exclude_list` | **Set users to exclude from limits (regex)** | Yes* |
+| `set_user_include_list` | **Set users to include in monitoring (regex)** | Yes* |
+| `validate_user_filter_pattern` | **Validate regex pattern for filters** | No |
 | `activate_limits` | Manually activate CPU limits | Yes* |
 | `deactivate_limits` | Manually deactivate CPU limits | Yes* |
 
@@ -420,6 +424,113 @@ Picco Utilizzo Memoria: 512.3 MB
   "message": "Limits activated successfully"
 }
 ```
+
+## User Filter Management (NEW in v1.11.0)
+
+### Tool: get_user_filters
+
+Ottiene le configurazioni correnti dei filtri utente.
+
+**Input:** Nessuno
+
+**Output:**
+```json
+{
+  "user_include_list": ["^www.*", "^app-.*"],
+  "user_exclude_list": ["^test-.*", "francesco"],
+  "config_file": "/etc/cpu-manager.conf"
+}
+```
+
+### Tool: set_user_exclude_list
+
+Imposta la lista di utenti da escludere dai limiti CPU (supporta regex).
+
+**Input:**
+```json
+{
+  "patterns": ["^test-.*", "^dev-.*", "francesco"],
+  "reload": true
+}
+```
+
+**Parametri:**
+- `patterns` (array di stringhe): Lista di pattern regex per utenti da escludere
+- `reload` (boolean, opzionale, default=true): Se true, ricarica automaticamente la configurazione
+
+**Output:**
+```json
+{
+  "success": true,
+  "message": "User exclude list updated successfully",
+  "previous_value": ["^old-.*"],
+  "new_value": ["^test-.*", "^dev-.*", "francesco"],
+  "reload_triggered": true
+}
+```
+
+**Backup Automatico:**
+- Prima di ogni modifica, viene creato un backup: `/etc/cpu-manager.conf.backup_YYYYMMDD_HHMMSS`
+- In caso di errore, la configurazione viene ripristinata automaticamente
+
+### Tool: set_user_include_list
+
+Imposta la lista di pattern per includere utenti nel monitoraggio (supporta regex).
+
+**Input:**
+```json
+{
+  "patterns": ["^www.*", "^app-.*", "mysql"],
+  "reload": true
+}
+```
+
+**Parametri:**
+- `patterns` (array di stringhe): Lista di pattern regex per utenti da includere
+- `reload` (boolean, opzionale, default=true): Se true, ricarica automaticamente la configurazione
+
+**Output:**
+```json
+{
+  "success": true,
+  "message": "User include list updated successfully",
+  "previous_value": [],
+  "new_value": ["^www.*", "^app-.*", "mysql"],
+  "reload_triggered": true
+}
+```
+
+### Tool: validate_user_filter_pattern
+
+Valida se un pattern regex è valido e mostra esempi di match.
+
+**Input:**
+```json
+{
+  "pattern": "^www.*",
+  "type": "exclude"
+}
+```
+
+**Parametri:**
+- `pattern` (string): Pattern regex da validare (richiesto)
+- `type` (string, opzionale): Tipo di filtro - "include" o "exclude"
+
+**Output:**
+```json
+{
+  "valid": true,
+  "pattern": "^www.*",
+  "type": "exclude",
+  "test_matches": ["www-data", "www-run"],
+  "match_count": 2
+}
+```
+
+**Utenti di Test:**
+Il tool testa il pattern contro questi utenti di esempio:
+- francesco, www-data, mysql, nobody, root
+- test-user, dev-web, app-prod, svc-db, admin
 
 ## Future Enhancements
 

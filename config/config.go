@@ -20,9 +20,11 @@ package config
 import (
     "fmt"
     "os"
+    "regexp"
     "strconv"
     "strings"
     "reflect"
+    "time"
 )
 
 // Config contiene tutti i parametri configurabili dell'applicazione.
@@ -80,8 +82,11 @@ type Config struct {
     SystemUIDMin   int `config:"SYSTEM_UID_MIN"`
     SystemUIDMax   int `config:"SYSTEM_UID_MAX"`
 
-    // User Whitelist (optional)
-    UserWhitelist []string `config:"USER_WHITELIST"`  // Comma-separated list of usernames
+    // User Include List (users to INCLUDE in monitoring, regex support)
+    UserIncludeList []string `config:"USER_INCLUDE_LIST"`  // Comma-separated regex patterns
+
+    // User Exclude List (users to EXCLUDE from limits, regex support)
+    UserExcludeList []string `config:"USER_EXCLUDE_LIST"`  // Comma-separated regex patterns
 
     // Load checking
     IgnoreSystemLoad bool `config:"IGNORE_SYSTEM_LOAD"`
@@ -156,7 +161,8 @@ func DefaultConfig() *Config {
         SystemUIDMax:   pidMax,
         IgnoreSystemLoad: false,
         ServerRole:       "",  // Empty by default
-        UserWhitelist:     nil, // nil = all users (no whitelist)
+        UserIncludeList:   nil, // nil = all users included (no filter)
+        UserExcludeList:   nil, // nil = no users excluded (all users can be limited)
 
         // MCP Server
         MCPEnabled:       false,
@@ -419,23 +425,71 @@ func setConfigField(cfg *Config, key, value string) error {
             cfg.SystemUIDMax = i
         }
 
-    // User Whitelist
-    case "USER_WHITELIST":
-        // Parse comma-separated list of usernames
+    // User Include List
+    case "USER_INCLUDE_LIST":
+        // Parse comma-separated list of regex patterns
         value = strings.TrimSpace(value)
         if value == "" {
-            cfg.UserWhitelist = nil // Empty = all users
+            cfg.UserIncludeList = nil // Empty = all users included
+        } else {
+            patterns := strings.Split(value, ",")
+            cfg.UserIncludeList = make([]string, 0, len(patterns))
+            for _, pattern := range patterns {
+                pattern = strings.TrimSpace(pattern)
+                if pattern != "" {
+                    // Validate regex pattern
+                    if _, err := regexp.Compile(pattern); err != nil {
+                        return fmt.Errorf("invalid regex pattern '%s': %w", pattern, err)
+                    }
+                    cfg.UserIncludeList = append(cfg.UserIncludeList, pattern)
+                }
+            }
+            if len(cfg.UserIncludeList) == 0 {
+                cfg.UserIncludeList = nil
+            }
+        }
+
+    // User Exclude List
+    case "USER_EXCLUDE_LIST":
+        // Parse comma-separated list of regex patterns
+        value = strings.TrimSpace(value)
+        if value == "" {
+            cfg.UserExcludeList = nil // Empty = no users excluded
+        } else {
+            patterns := strings.Split(value, ",")
+            cfg.UserExcludeList = make([]string, 0, len(patterns))
+            for _, pattern := range patterns {
+                pattern = strings.TrimSpace(pattern)
+                if pattern != "" {
+                    // Validate regex pattern
+                    if _, err := regexp.Compile(pattern); err != nil {
+                        return fmt.Errorf("invalid regex pattern '%s': %w", pattern, err)
+                    }
+                    cfg.UserExcludeList = append(cfg.UserExcludeList, pattern)
+                }
+            }
+            if len(cfg.UserExcludeList) == 0 {
+                cfg.UserExcludeList = nil
+            }
+        }
+
+    // Backward compatibility: old variable name
+    case "USER_WHITELIST":
+        // Treat old USER_WHITELIST as USER_EXCLUDE_LIST for compatibility
+        value = strings.TrimSpace(value)
+        if value == "" {
+            cfg.UserExcludeList = nil
         } else {
             usernames := strings.Split(value, ",")
-            cfg.UserWhitelist = make([]string, 0, len(usernames))
+            cfg.UserExcludeList = make([]string, 0, len(usernames))
             for _, username := range usernames {
                 username = strings.TrimSpace(username)
                 if username != "" {
-                    cfg.UserWhitelist = append(cfg.UserWhitelist, username)
+                    cfg.UserExcludeList = append(cfg.UserExcludeList, username)
                 }
             }
-            if len(cfg.UserWhitelist) == 0 {
-                cfg.UserWhitelist = nil
+            if len(cfg.UserExcludeList) == 0 {
+                cfg.UserExcludeList = nil
             }
         }
 
@@ -552,14 +606,248 @@ func isValidCPUQuota(quota string) bool {
     return err1 == nil && err2 == nil
 }
 
-// IsUserWhitelisted verifica se un username è nella whitelist
-// Se la whitelist è nil o vuota, tutti gli utenti sono considerati whitelisted
-func (c *Config) IsUserWhitelisted(username string) bool {
-    if c.UserWhitelist == nil || len(c.UserWhitelist) == 0 {
-        return true // No whitelist = all users allowed
+// IsUserIncluded verifica se un username corrisponde ai pattern della include list
+// Se la include list è nil o vuota, tutti gli utenti sono inclusi
+func (c *Config) IsUserIncluded(username string) bool {
+    // Se la include list non è configurata o è vuota, tutti gli utenti sono inclusi
+    if c.UserIncludeList == nil || len(c.UserIncludeList) == 0 {
+        return true // No include list = all users included
     }
-    for _, whitelisted := range c.UserWhitelist {
-        if whitelisted == username {
+    
+    // Altrimenti, controlla se lo username corrisponde a uno dei pattern regex
+    for _, pattern := range c.UserIncludeList {
+        if matched, _ := regexp.MatchString(pattern, username); matched {
+            return true // User matches include pattern
+        }
+    }
+    return false // User does not match any include pattern
+}
+
+// IsUserExcluded verifica se un username corrisponde ai pattern della exclude list
+// Se la exclude list è nil o vuota, nessun utente è escluso (tutti possono essere limitati)
+func (c *Config) IsUserExcluded(username string) bool {
+    // Se la exclude list non è configurata o è vuota, nessun utente è escluso
+    if c.UserExcludeList == nil || len(c.UserExcludeList) == 0 {
+        return false // No exclude list = no users excluded
+    }
+    
+    // Altrimenti, controlla se lo username corrisponde a uno dei pattern regex
+    for _, pattern := range c.UserExcludeList {
+        if matched, _ := regexp.MatchString(pattern, username); matched {
+            return true // User matches exclude pattern
+        }
+    }
+    return false
+}
+
+// IsUserWhitelisted è un alias per IsUserExcluded per retrocompatibilità
+// Il nome è fuorviante ma mantenuto per compatibilità con il codice esistente
+func (c *Config) IsUserWhitelisted(username string) bool {
+    return !c.IsUserExcluded(username)
+}
+
+// SetUserExcludeList imposta la lista di utenti da escludere e salva su file
+func (c *Config) SetUserExcludeList(patterns []string, configPath string, reload bool) ([]string, error) {
+    // Valida tutti i pattern regex
+    for _, pattern := range patterns {
+        if _, err := regexp.Compile(pattern); err != nil {
+            return nil, fmt.Errorf("invalid regex pattern '%s': %w", pattern, err)
+        }
+    }
+    
+    // Salva valore precedente
+    previousValue := make([]string, len(c.UserExcludeList))
+    copy(previousValue, c.UserExcludeList)
+    
+    // Aggiorna configurazione in memoria
+    c.UserExcludeList = patterns
+    
+    // Salva su file
+    if err := c.SaveToFile(configPath); err != nil {
+        // Ripristina valore precedente se salvataggio fallisce
+        c.UserExcludeList = previousValue
+        return nil, err
+    }
+    
+    return previousValue, nil
+}
+
+// SetUserIncludeList imposta la lista di pattern include e salva su file
+func (c *Config) SetUserIncludeList(patterns []string, configPath string, reload bool) ([]string, error) {
+    // Valida tutti i pattern regex
+    for _, pattern := range patterns {
+        if _, err := regexp.Compile(pattern); err != nil {
+            return nil, fmt.Errorf("invalid regex pattern '%s': %w", pattern, err)
+        }
+    }
+    
+    // Salva valore precedente
+    previousValue := make([]string, len(c.UserIncludeList))
+    copy(previousValue, c.UserIncludeList)
+    
+    // Aggiorna configurazione in memoria
+    c.UserIncludeList = patterns
+    
+    // Salva su file
+    if err := c.SaveToFile(configPath); err != nil {
+        // Ripristina valore precedente se salvataggio fallisce
+        c.UserIncludeList = previousValue
+        return nil, err
+    }
+    
+    return previousValue, nil
+}
+
+// SaveToFile salva la configurazione su file, creando backup automatico
+func (c *Config) SaveToFile(path string) error {
+    // 1. Crea backup del file esistente
+    if _, err := os.Stat(path); err == nil {
+        timestamp := time.Now().Format("20060102_150405")
+        backupPath := fmt.Sprintf("%s.backup_%s", path, timestamp)
+        
+        // Leggi contenuto originale
+        content, err := os.ReadFile(path)
+        if err != nil {
+            return fmt.Errorf("failed to read config file for backup: %w", err)
+        }
+        
+        // Scrivi backup
+        if err := os.WriteFile(backupPath, content, 0644); err != nil {
+            return fmt.Errorf("failed to create backup: %w", err)
+        }
+    }
+    
+    // 2. Leggi il file esistente e aggiorna le righe
+    lines, err := c.updateConfigLines(path)
+    if err != nil {
+        return err
+    }
+    
+    // 3. Scrivi su file temporaneo
+    tmpPath := path + ".tmp"
+    content := strings.Join(lines, "\n")
+    if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
+        return fmt.Errorf("failed to write temp config file: %w", err)
+    }
+    
+    // 4. Rinomina atomico
+    if err := os.Rename(tmpPath, path); err != nil {
+        os.Remove(tmpPath) // Cleanup se rename fallisce
+        return fmt.Errorf("failed to rename config file: %w", err)
+    }
+    
+    return nil
+}
+
+// updateConfigLines legge e aggiorna le righe della configurazione
+func (c *Config) updateConfigLines(path string) ([]string, error) {
+    // Leggi file esistente
+    content, err := os.ReadFile(path)
+    if err != nil {
+        if os.IsNotExist(err) {
+            // File non esiste, crea nuovo
+            return c.generateConfigLines(), nil
+        }
+        return nil, fmt.Errorf("failed to read config file: %w", err)
+    }
+    
+    lines := strings.Split(string(content), "\n")
+    updated := make([]string, 0, len(lines))
+    
+    includeListWritten := false
+    excludeListWritten := false
+    
+    for _, line := range lines {
+        trimmed := strings.TrimSpace(line)
+        
+        // Salta commenti e righe vuote
+        if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+            updated = append(updated, line)
+            continue
+        }
+        
+        // Controlla se è USER_INCLUDE_LIST o USER_EXCLUDE_LIST
+        if strings.HasPrefix(trimmed, "USER_INCLUDE_LIST=") {
+            value := strings.Join(c.UserIncludeList, ",")
+            updated = append(updated, fmt.Sprintf("USER_INCLUDE_LIST=%s", value))
+            includeListWritten = true
+            continue
+        }
+        
+        if strings.HasPrefix(trimmed, "USER_EXCLUDE_LIST=") {
+            value := strings.Join(c.UserExcludeList, ",")
+            updated = append(updated, fmt.Sprintf("USER_EXCLUDE_LIST=%s", value))
+            excludeListWritten = true
+            continue
+        }
+        
+        // Altre righe lasciate invariate
+        updated = append(updated, line)
+    }
+    
+    // Aggiungi righe mancanti
+    if !includeListWritten {
+        value := strings.Join(c.UserIncludeList, ",")
+        updated = append(updated, fmt.Sprintf("USER_INCLUDE_LIST=%s", value))
+    }
+    if !excludeListWritten {
+        value := strings.Join(c.UserExcludeList, ",")
+        updated = append(updated, fmt.Sprintf("USER_EXCLUDE_LIST=%s", value))
+    }
+    
+    return updated, nil
+}
+
+// generateConfigLines genera linee di configurazione di base
+func (c *Config) generateConfigLines() []string {
+    includeList := ""
+    if len(c.UserIncludeList) > 0 {
+        includeList = strings.Join(c.UserIncludeList, ",")
+    }
+    excludeList := ""
+    if len(c.UserExcludeList) > 0 {
+        excludeList = strings.Join(c.UserExcludeList, ",")
+    }
+    
+    return []string{
+        "# CPU Manager Configuration",
+        fmt.Sprintf("USER_INCLUDE_LIST=%s", includeList),
+        fmt.Sprintf("USER_EXCLUDE_LIST=%s", excludeList),
+        "",
+    }
+}
+
+// IsProcessExcluded verifica se un processo dovrebbe essere escluso dai limiti
+// Controlla il nome del comando (comm) contro la blacklist di processi di sistema
+func (c *Config) IsProcessExcluded(processName string) bool {
+    // Processi di sistema che non dovrebbero mai essere limitati
+    excludedProcesses := []string{
+        "systemd", "dbus-daemon", "dbus-broker", "polkitd", "udisks2d",
+        "NetworkManager", "nm-dispatcher", "wpa_supplicant",
+        "sshd", "sshd-session", "cron", "crond", "anacron",
+        "rsyslogd", "rsyslog", "syslogd", "syslog-ng",
+        "dockerd", "docker", "containerd", "kubelet", "kube-proxy",
+        "nginx", "apache2", "httpd", "php-fpm",
+        "mysqld", "mariadbd", "postgres", "mongod", "redis-server",
+        "postfix", "master", "pickup", "qmgr",
+        "chronyd", "ntpd", "systemd-timesyncd",
+        "firewalld", "iptables", "nft",
+        "auditd", "audit",
+        "irqbalance", "mcelog", "smartd",
+        "cupsd", "avahi-daemon", "bluetoothd",
+        "gdm", "gdm-wayland-session", "gnome-shell",
+        "lightdm", "sddm", "xdm",
+        "vmtoolsd", "vmware-user", "VBoxService", "VBoxClient",
+        "qemu-ga", "qemu-system", "libvirtd",
+        "lxcfs", "lxc-monitord",
+        "zabbix_agentd", "zabbix_sender",
+        "prometheus", "node_exporter", "grafana-server",
+        "telegraf", "collectd", "datadog-agent",
+    }
+    
+    processName = strings.ToLower(processName)
+    for _, excluded := range excludedProcesses {
+        if processName == excluded || strings.HasPrefix(processName, excluded+"-") {
             return true
         }
     }

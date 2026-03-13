@@ -57,8 +57,13 @@ type Collector struct {
     cacheMutex       sync.RWMutex
 
     // Stato precedente per calcolo delta CPU
-    prevCPUStats cpu.TimesStat
-    prevCPUTime  time.Time
+    prevCPUStats     cpu.TimesStat
+    prevCPUTime      time.Time
+    
+    // Cache per CPU usage per processo (necessaria per calcolo delta)
+    prevProcCPU      map[int32]cpu.TimesStat
+    prevProcTime     map[int32]time.Time
+    procCPUMutex     sync.RWMutex
 }
 
 // NewCollector crea un nuovo collettore di metriche.
@@ -71,6 +76,8 @@ func NewCollector(cfg *config.Config) (*Collector, error) {
         cache:           make(map[string]interface{}),
         cacheTimestamps: make(map[string]time.Time),
         prevCPUTime:     time.Now(),
+        prevProcCPU:     make(map[int32]cpu.TimesStat),
+        prevProcTime:    make(map[int32]time.Time),
     }
 
     // Inizializza le statistiche CPU precedenti
@@ -237,6 +244,7 @@ func (c *Collector) getTotalCPUUsageFallback() float64 {
 }
 
 // GetUserCPUUsage restituisce l'uso CPU per un utente specifico.
+// Esclude i processi di sistema dalla blacklist
 func (c *Collector) GetUserCPUUsage(uid int) float64 {
     if !c.isValidUserUID(uid) {
         return 0.0
@@ -248,24 +256,43 @@ func (c *Collector) GetUserCPUUsage(uid int) float64 {
     }
 
     var totalUsage float64
+    var processCount int
 
-    // Metodo 1: Usa gopsutil/process
+    // Metodo: Usa gopsutil/process.CPUPercent() che gestisce internamente il delta
     processes, err := process.Processes()
     if err == nil {
         for _, p := range processes {
             // Ottieni l'UID del processo
             if uids, err := p.Uids(); err == nil && len(uids) > 0 {
                 if int(uids[0]) == uid { // UID reale
+                    // Escludi processi di sistema
+                    pname, _ := p.Name()
+                    if c.cfg.IsProcessExcluded(pname) {
+                        continue
+                    }
+                    
+                    processCount++
+                    // CPUPercent() fa due letture internamente
+                    // La prima volta restituisce 0, ma le successive funzionano
                     if cpuPercent, err := p.CPUPercent(); err == nil {
+                        c.logger.Debug("Process CPU usage",
+                            "pid", p.Pid,
+                            "uid", uid,
+                            "name", pname,
+                            "cpu_percent", cpuPercent,
+                        )
                         totalUsage += cpuPercent
                     }
                 }
             }
         }
-    } else {
-        // Fallback: usa ps command come nello script Bash
-        totalUsage = c.getUserCPUUsageFallback(uid)
     }
+
+    c.logger.Info("User CPU usage calculated",
+        "uid", uid,
+        "process_count", processCount,
+        "total_usage", totalUsage,
+    )
 
     c.setInCache(cacheKey, totalUsage)
     return totalUsage
@@ -417,6 +444,9 @@ func (c *Collector) GetTotalUserCPUUsage() float64 {
 }
 
 // GetActiveUsers restituisce la lista degli UID attivi (non di sistema).
+// Esclude gli utenti che hanno solo processi di sistema esclusi
+// Esclude anche gli utenti nella USER_EXCLUDE_LIST
+// Include solo gli utenti nella USER_INCLUDE_LIST (se specificata)
 func (c *Collector) GetActiveUsers() []int {
     cacheKey := "active_users"
     if val, valid := c.getFromCache(cacheKey, time.Duration(c.cfg.MetricsCacheTTL)*time.Second); valid {
@@ -432,10 +462,17 @@ func (c *Collector) GetActiveUsers() []int {
             if uids, err := p.Uids(); err == nil && len(uids) > 0 {
                 uid := int(uids[0])
                 if c.isValidUserUID(uid) {
-                    // Check whitelist if configured
+                    // Check se l'utente è incluso nella include list
                     username := c.getUsername(uid)
-                    if c.cfg.IsUserWhitelisted(username) {
-                        uidMap[uid] = true
+                    if c.cfg.IsUserIncluded(username) {
+                        // Check se l'utente è escluso dalla exclude list
+                        if !c.cfg.IsUserExcluded(username) {
+                            // Controlla se il processo è escluso (processi di sistema)
+                            pname, _ := p.Name()
+                            if !c.cfg.IsProcessExcluded(pname) {
+                                uidMap[uid] = true
+                            }
+                        }
                     }
                 }
             }
@@ -450,6 +487,13 @@ func (c *Collector) GetActiveUsers() []int {
     for uid := range uidMap {
         users = append(users, uid)
     }
+
+    c.logger.Info("Active users detected",
+        "uids", users,
+        "count", len(users),
+        "include_list", c.cfg.UserIncludeList,
+        "exclude_list", c.cfg.UserExcludeList,
+    )
 
     c.setInCache(cacheKey, users)
     return users
@@ -703,6 +747,19 @@ func (c *Collector) ClearCache() {
 
     c.cache = make(map[string]interface{})
     c.cacheTimestamps = make(map[string]time.Time)
+}
+
+// UpdateConfig aggiorna la configurazione del collector
+func (c *Collector) UpdateConfig(newConfig *config.Config) {
+    c.cfg = newConfig
+    c.logger.Info("Metrics collector configuration updated",
+        "metrics_cache_ttl", newConfig.MetricsCacheTTL,
+        "system_uid_min", newConfig.SystemUIDMin,
+        "system_uid_max", newConfig.SystemUIDMax,
+        "user_exclude_list", newConfig.UserExcludeList,
+    )
+    // Pulisci la cache per applicare immediatamente i cambiamenti
+    c.ClearCache()
 }
 
 // GetDetailedMetrics restituisce metriche dettagliate per debugging.
