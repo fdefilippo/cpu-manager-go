@@ -54,6 +54,9 @@ type Config struct {
     CPUThreshold       int `config:"CPU_THRESHOLD"`
     CPUReleaseThreshold int `config:"CPU_RELEASE_THRESHOLD"`
 
+    // Threshold Time Window (seconds)
+    CPUThresholdDuration int `config:"CPU_THRESHOLD_DURATION"`  // Seconds to wait before activating limits (0 = immediate)
+
     // CPU limits (cpu.max format: "quota period")
     CPUQuotaNormal   string `config:"CPU_QUOTA_NORMAL"`
     CPUQuotaLimited  string `config:"CPU_QUOTA_LIMITED"`
@@ -142,8 +145,9 @@ func DefaultConfig() *Config {
         MinActiveTime:    60,
         MetricsCacheTTL:  15,
 
-        CPUThreshold:       75,
+        CPUThreshold:        75,
         CPUReleaseThreshold: 40,
+        CPUThresholdDuration: 90,  // Default: wait 90 seconds before activating limits
 
         CPUQuotaNormal:  "max 100000",
         CPUQuotaLimited: "50000 100000", // 0.5 core
@@ -349,6 +353,10 @@ func setConfigField(cfg *Config, key, value string) error {
     case "CPU_RELEASE_THRESHOLD":
         if i, err := strconv.Atoi(value); err == nil {
             cfg.CPUReleaseThreshold = i
+        }
+    case "CPU_THRESHOLD_DURATION":
+        if i, err := strconv.Atoi(value); err == nil {
+            cfg.CPUThresholdDuration = i
         }
 
     // CPU limits
@@ -615,6 +623,11 @@ func validateConfig(cfg *Config) error {
     }
     if cfg.CPUThreshold <= cfg.CPUReleaseThreshold {
         errors = append(errors, "CPU_THRESHOLD must be greater than CPU_RELEASE_THRESHOLD")
+    }
+    
+    // Validate threshold duration
+    if cfg.CPUThresholdDuration < 0 {
+        errors = append(errors, "CPU_THRESHOLD_DURATION cannot be negative")
     }
 
     // Validate polling interval

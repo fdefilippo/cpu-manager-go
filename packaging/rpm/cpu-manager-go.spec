@@ -10,7 +10,7 @@
 # - Script generazione certificati TLS
 
 Name:    cpu-manager-go
-Version: 1.13.1
+Version: 1.15.1
 Release: 1%{?dist}
 Summary: Dynamic CPU resource management tool using cgroups v2
 

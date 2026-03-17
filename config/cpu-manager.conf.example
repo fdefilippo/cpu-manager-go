@@ -19,8 +19,25 @@ METRICS_CACHE_TTL=15
 # ========================
 # THRESHOLDS (percentages)
 # ========================
-CPU_THRESHOLD=75
-CPU_RELEASE_THRESHOLD=40
+CPU_THRESHOLD=75             # Attiva limiti se CPU utenti >= 75%
+CPU_RELEASE_THRESHOLD=40     # Rilascia limiti se CPU utenti < 40%
+
+# THRESHOLD TIME WINDOW (seconds)
+# CPU_THRESHOLD_DURATION: Tempo di attesa prima di attivare i limiti dopo superamento soglia
+# Utile per evitare attivazione per picchi temporanei (es: deploy, backup)
+# Default: 90 secondi (3 cicli da 30s)
+# Imposta a 0 per attivazione immediata (comportamento legacy)
+#
+# Esempi:
+# # Attivazione immediata (comportamento pre-v1.15.0)
+# CPU_THRESHOLD_DURATION=0
+#
+# # Attendi 90 secondi (default)
+# CPU_THRESHOLD_DURATION=90
+#
+# # Attendi 3 minuti (ambienti critici)
+# CPU_THRESHOLD_DURATION=180
+CPU_THRESHOLD_DURATION=90
 
 # ========================
 # CPU LIMITS (cpu.max format: "quota period")

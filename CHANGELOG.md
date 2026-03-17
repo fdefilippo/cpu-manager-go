@@ -5,6 +5,72 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
+## [1.15.1] - 2026-03-17
+
+### Corretto
+
+#### Fix Rilascio Utenti Inattivi
+- **Fix critico**: Utenti inattivi ora vengono rilasciati dal cgroup "limited"
+- Precedentemente: utenti rimanevano nel cgroup limited anche con CPU 0%
+- Adesso: utenti con CPU < 0.1% per un ciclo vengono rilasciati automaticamente
+- Log dettagliato per tracciare rilasci utenti
+
+**Funzionamento:**
+1. Limiti attivi → Tutti gli utenti nel cgroup "limited"
+2. Ciclo successivo → Controlla CPU usage per-user
+3. Utente con CPU < 0.1% → Rilasciato dal cgroup "limited"
+4. Log: "Releasing idle users from CPU limits"
+
+**Vantaggi:**
+- ✅ Utenti inattivi non rimangono limitati inutilmente
+- ✅ Metriche `cpu_manager_user_cpu_limited` accurate
+- ✅ Migliore gestione risorse (solo utenti attivi limitati)
+- ✅ Log dettagliato per troubleshooting
+
+---
+
+## [1.15.0] - 2026-03-17
+
+### Aggiunto
+
+#### Threshold Time Window
+- Nuova variabile `CPU_THRESHOLD_DURATION` per specificare tempo di attesa prima di attivare limiti
+- Previene attivazione per picchi CPU temporanei (es: deploy, backup, restart servizi)
+- Default: 90 secondi (3 cicli da 30s)
+- Imposta a `0` per attivazione immediata (comportamento pre-v1.15.0)
+
+**Configurazione:**
+```bash
+# Attivazione immediata (comportamento legacy)
+CPU_THRESHOLD_DURATION=0
+
+# Attendi 90 secondi (default)
+CPU_THRESHOLD_DURATION=90
+
+# Attendi 3 minuti (ambienti critici)
+CPU_THRESHOLD_DURATION=180
+```
+
+**Funzionamento:**
+1. CPU supera soglia (es: 75%) → Avvia timer
+2. CPU rimane sopra soglia per N secondi → Attiva limiti
+3. CPU scende sotto soglia prima del timeout → Reset timer
+
+**Logging:**
+```
+[INFO] CPU threshold exceeded, waiting 60s before activating limits (78.5% >= 75%)
+[INFO] CPU threshold exceeded, waiting 30s before activating limits (80.2% >= 75%)
+[INFO] Activating CPU limits with proportional weights
+```
+
+**Vantaggi:**
+- ✅ Evita attivazione limiti per picchi temporanei
+- ✅ Maggiore stabilità in ambienti con workload variabile
+- ✅ Configurabile in base alle esigenze
+- ✅ Backward compatibile (CPU_THRESHOLD_DURATION=0)
+
+---
+
 ## [1.14.1] - 2026-03-13
 
 ### Corretto
