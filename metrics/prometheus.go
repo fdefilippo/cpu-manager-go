@@ -68,6 +68,10 @@ type PrometheusExporter struct {
   cgroupCPUPeriod   *prometheus.GaugeVec
   cgroupMemoryUsage *prometheus.GaugeVec
 
+  // Track utenti attivi per cleanup metriche
+  activeUserMetrics map[string]bool  // "uid_username" -> true
+  metricsMu         sync.RWMutex
+
   // Metriche counter (solo incremento)
   limitsActivatedTotal   prometheus.Counter
   limitsDeactivatedTotal prometheus.Counter
@@ -135,6 +139,7 @@ exp := &PrometheusExporter{
   serverRole:     serverRole,
   updateInterval: 15 * time.Second,
   stopChan:       make(chan struct{}, 1),
+  activeUserMetrics: make(map[string]bool),
 }
 
 logger.Info("Prometheus exporter created",
@@ -519,6 +524,10 @@ func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUs
     username = exp.getUsernameFromUID(uidStr)
   }
 
+  // Marca utente come attivo
+  userKey := fmt.Sprintf("%s_%s", uidStr, username)
+  exp.activeUserMetrics[userKey] = true
+
   // Aggiorna uso CPU dell'utente
   exp.userCPUUsage.WithLabelValues(uidStr, username).Set(cpuUsage)
 
@@ -555,16 +564,47 @@ func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUs
 }
 
 // CleanupUserMetrics rimuove le metriche per gli utenti non più attivi.
-// Nota: questa implementazione è semplificata e tiene traccia internamente degli UID.
 func (exp *PrometheusExporter) CleanupUserMetrics(activeUids map[int]bool) {
   if exp == nil {
     return
   }
 
-  // Nota: Prometheus non espone un modo diretto per iterare sulle label registrate
-  // Per una pulizia corretta, si dovrebbe tenere un registro interno degli UID tracciati
-  // Questa implementazione è un placeholder per futura estensione
-  _ = activeUids
+  exp.metricsMu.Lock()
+  defer exp.metricsMu.Unlock()
+
+  // Itera su tutti gli utenti tracciati
+  for userKey := range exp.activeUserMetrics {
+    // Controlla se l'utente è ancora attivo
+    parts := strings.SplitN(userKey, "_", 2)
+    if len(parts) != 2 {
+      continue
+    }
+    
+    uidStr := parts[0]
+    username := parts[1]
+    
+    uid, err := strconv.Atoi(uidStr)
+    if err != nil {
+      continue
+    }
+    
+    // Se l'utente non è più attivo, rimuovi le metriche
+    if !activeUids[uid] {
+      // Rimuovi dalle metriche
+      exp.userCPUUsage.DeleteLabelValues(uidStr, username)
+      exp.userMemoryUsage.DeleteLabelValues(uidStr, username)
+      exp.userProcessCount.DeleteLabelValues(uidStr, username)
+      exp.userLimited.DeleteLabelValues(uidStr, username)
+      
+      // Rimuovi dal tracking
+      delete(exp.activeUserMetrics, userKey)
+      
+      exp.logger.Debug("Removed metrics for inactive user",
+        "uid", uid,
+        "username", username,
+      )
+    }
+  }
 }
 
 // getUserMemoryUsage calcola l'uso memoria di un utente in bytes

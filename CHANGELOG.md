@@ -5,6 +5,30 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
+## [1.15.2] - 2026-03-17
+
+### Corretto
+
+#### Fix Cleanup Metriche Prometheus
+- **Fix critico**: Rimosse automaticamente le metriche per utenti non più attivi
+- Precedentemente: le metriche rimanevano per sempre anche dopo terminazione processi
+- Adesso: cleanup automatico ad ogni ciclo di aggiornamento metriche
+- Tracking interno degli utenti attivi per identificare metriche obsolete
+
+**Funzionamento:**
+1. Ogni utente attivo viene tracciato in `activeUserMetrics`
+2. Ad ogni ciclo: confronta utenti tracciati vs utenti reali in /proc
+3. Utente non più in /proc → Rimuovi metriche Prometheus
+4. Log debug: "Removed metrics for inactive user"
+
+**Vantaggi:**
+- ✅ Metriche Prometheus accurate e pulite
+- ✅ Nessun "fantasma" di utenti inesistenti
+- ✅ Memoria Prometheus ottimizzata
+- ✅ Query `cpu_manager_user_cpu_*` mostrano solo utenti attivi
+
+---
+
 ## [1.15.1] - 2026-03-17
 
 ### Corretto
