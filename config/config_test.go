@@ -44,8 +44,8 @@ func TestDefaultConfig(t *testing.T) {
         {"CPUQuotaNormal", cfg.CPUQuotaNormal, "max 100000"},
         {"CPUQuotaLimited", cfg.CPUQuotaLimited, "50000 100000"},
         {"EnablePrometheus", cfg.EnablePrometheus, false},
-        {"PrometheusMetricsBindPort", cfg.PrometheusMetricsBindPort, 9101},
-        {"PrometheusMetricsBindHost", cfg.PrometheusMetricsBindHost, "127.0.0.1"},
+        {"PrometheusMetricsBindPort", cfg.PrometheusMetricsBindPort, 1974},
+        {"PrometheusMetricsBindHost", cfg.PrometheusMetricsBindHost, ""},
         {"LogLevel", cfg.LogLevel, "INFO"},
         {"SystemUIDMin", cfg.SystemUIDMin, 1000},
         {"IgnoreSystemLoad", cfg.IgnoreSystemLoad, false},
@@ -67,13 +67,15 @@ func TestValidateConfig(t *testing.T) {
         {
             name: "valid config",
             cfg: &Config{
-                CPUThreshold:        75,
-                CPUReleaseThreshold: 40,
-                PollingInterval:     30,
-                CPUQuotaLimited:     "50000 100000",
-                LogLevel:            "INFO",
-                SystemUIDMin:        1000,
-                SystemUIDMax:        60000,
+                CPUThreshold:         75,
+                CPUReleaseThreshold:  40,
+                PollingInterval:      30,
+                CPUQuotaLimited:      "50000 100000",
+                LogLevel:             "INFO",
+                SystemUIDMin:         1000,
+                SystemUIDMax:         60000,
+                MetricsDBRetentionDays: 30,
+                MetricsDBWriteInterval: 30,
             },
             expectError: false,
         },
@@ -324,7 +326,7 @@ func TestLoadFromEnvironment(t *testing.T) {
     os.Setenv("POLLING_INTERVAL", "45")
     os.Setenv("LOG_LEVEL", "DEBUG")
     os.Setenv("ENABLE_PROMETHEUS", "true")
-    os.Setenv("PROMETHEUS_PORT", "9103")
+    os.Setenv("PROMETHEUS_METRICS_BIND_PORT", "1974")
 
     // Pulisci dopo il test
     defer func() {
@@ -333,7 +335,7 @@ func TestLoadFromEnvironment(t *testing.T) {
         os.Unsetenv("POLLING_INTERVAL")
         os.Unsetenv("LOG_LEVEL")
         os.Unsetenv("ENABLE_PROMETHEUS")
-        os.Unsetenv("PROMETHEUS_PORT")
+        os.Unsetenv("PROMETHEUS_METRICS_BIND_PORT")
     }()
 
     cfg := DefaultConfig()
@@ -354,8 +356,8 @@ func TestLoadFromEnvironment(t *testing.T) {
     if !cfg.EnablePrometheus {
         t.Errorf("EnablePrometheus: got %v, expected true", cfg.EnablePrometheus)
     }
-    if cfg.PrometheusMetricsBindPort != 9103 {
-        t.Errorf("PrometheusMetricsBindPort: got %d, expected 9103", cfg.PrometheusMetricsBindPort)
+    if cfg.PrometheusMetricsBindPort != 1974 {
+        t.Errorf("PrometheusMetricsBindPort: got %d, expected 1974", cfg.PrometheusMetricsBindPort)
     }
 }
 
