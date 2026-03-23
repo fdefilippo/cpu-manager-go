@@ -5,6 +5,40 @@ Tutti i cambiamenti significativi a questo progetto sono documentati in questo f
 Il formato è basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/),
 e questo progetto aderisce al [Semantic Versioning](https://semver.org/lang/it/).
 
+## [1.16.4] - 2026-03-21
+
+### Aggiunto
+
+#### Limitazione RAM con cgroups v2
+Nuovo sistema di limitazione memoria compatibile con il sistema CPU esistente.
+
+**Parametri di configurazione:**
+- `RAM_LIMIT_ENABLED`: Abilita/disabilita limitazione RAM
+- `RAM_THRESHOLD`: % RAM per attivazione limiti (default: 75)
+- `RAM_RELEASE_THRESHOLD`: % RAM per rilascio limiti (default: 40)
+- `RAM_QUOTA_LIMITED`: Limite RAM totale in bytes (es. "2G")
+- `RAM_QUOTA_PER_USER`: Limite RAM per utente (default: 512M)
+- `DISABLE_SWAP`: Disabilita swap nei cgroups
+- `RAM_USER_INCLUDE_LIST`: Lista inclusione RAM (regex)
+- `RAM_USER_EXCLUDE_LIST`: Lista esclusione RAM (regex)
+
+**Metriche Prometheus:**
+- `cpu_manager_ram_total_usage_percent`: RAM totale sistema %
+- `cpu_manager_user_ram_usage_bytes`: RAM per utente in bytes
+
+**Funzioni cgroup manager:**
+- `ApplyRAMLimit(uid, limit)`: Applica limite RAM
+- `RemoveRAMLimit(uid)`: Rimuovi limite RAM
+- `ApplyRAMLimitWithSwapDisabled(uid, limit)`: Limite RAM + swap disabled
+- `GetCgroupRAMUsage(uid)`: Leggi uso RAM da cgroup
+
+**Logica di decisione:**
+- Decisioni CPU e RAM valutate separatamente
+- Attivazione se either CPU o RAM supera soglia
+- Rilascio solo se both CPU e RAM sotto soglia
+
+**Nota:** Richiede cgroups v2 con controller memory abilitato.
+
 ## [1.16.3] - 2026-03-20
 
 ### Corretto
