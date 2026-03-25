@@ -8,7 +8,7 @@
 
 # Nome del progetto
 PROJECT_NAME = resman
-VERSION = 1.18.1
+VERSION = 1.18.2
 RELEASE = 1
 
 # Percorsi
@@ -161,10 +161,9 @@ rpm-source: build rpm-dirs
 	@echo "Creating source tarball for RPM..."
 	mkdir -p $(PROJECT_NAME)-$(VERSION)
 	cp -r *.go go.mod go.sum \
-		config/ cgroup/ metrics/ state/ logging/ reloader/ \
+		config/ cgroup/ metrics/ state/ logging/ reloader/ mcp/ database/ \
 		README.md LICENSE CHANGELOG.md \
 		packaging/ docs/ \
-		mcp/ database/ \
 		$(PROJECT_NAME)-$(VERSION)/
 	mkdir -p $(PROJECT_NAME)-$(VERSION)/packaging/syslog
 	cp packaging/syslog/resman.conf $(PROJECT_NAME)-$(VERSION)/packaging/syslog/ 2>/dev/null || true

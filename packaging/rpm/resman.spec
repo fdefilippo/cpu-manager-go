@@ -10,7 +10,7 @@
 # - Script generazione certificati TLS
 
 Name:    resman
-Version: 1.18.1
+Version: 1.18.2
 Release: 1%{?dist}
 Summary: Dynamic CPU resource management tool using cgroups v2
 
@@ -97,8 +97,10 @@ Latest Changes (v1.5.0):
 %build
 # Build del binario Go
 export GO111MODULE=on
+export GOFLAGS="-mod=mod"  # Use go.mod, don't try to update it
 export CGO_ENABLED=1
-export GOFLAGS="-mod=mod"
+
+# Build binario principale
 go build -v -ldflags="-s -w -X 'main.version=%{version}-%{release}'" -o %{name}
 
 # Prepara man page
@@ -133,6 +135,7 @@ install -m 644 README.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 LICENSE %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 config/resman.conf.example %{buildroot}/%{_docdir}/%{name}/
 
+# Installa documentazione TLS
 install -m 644 docs/alerting-rules.yml %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 
 # Installa script generazione certificati TLS

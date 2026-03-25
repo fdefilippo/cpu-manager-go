@@ -1,0 +1,15 @@
+# Logrotate configuration for resman
+/var/log/resman.log {
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    rotate 7
+    daily
+    create 0640 root adm
+    postrotate
+        # Ricarica rsyslog dopo la rotazione
+        systemctl reload rsyslog 2>/dev/null || \
+    endscript
+}
