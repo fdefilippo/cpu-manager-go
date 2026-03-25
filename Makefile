@@ -164,6 +164,7 @@ rpm-source: build rpm-dirs
 		config/ cgroup/ metrics/ state/ logging/ reloader/ \
 		README.md LICENSE CHANGELOG.md \
 		packaging/ docs/ \
+		mcp/ database/ \
 		$(PROJECT_NAME)-$(VERSION)/
 	mkdir -p $(PROJECT_NAME)-$(VERSION)/packaging/syslog
 	cp packaging/syslog/resman.conf $(PROJECT_NAME)-$(VERSION)/packaging/syslog/ 2>/dev/null || true
@@ -218,9 +219,6 @@ deb-prepare: deb-dirs deb-binary
 	install -m 644 README.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
 	install -m 644 LICENSE $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
 	install -m 644 CHANGELOG.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
-	install -m 644 docs/TLS-CONFIGURATION.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
-	install -m 644 docs/MULTI-INSTANCE-MONITORING.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
-	install -m 644 docs/prometheus-queries.md $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
 	install -m 644 docs/alerting-rules.yml $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/; \
 	mkdir -p $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/scripts; \
 	install -m 755 docs/generate-tls-certs.sh $$PKG_DIR/usr/share/doc/$(PROJECT_NAME)/scripts/; \

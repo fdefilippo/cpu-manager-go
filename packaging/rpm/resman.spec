@@ -97,8 +97,8 @@ Latest Changes (v1.5.0):
 %build
 # Build del binario Go
 export GO111MODULE=on
-export GOPROXY=direct
 export CGO_ENABLED=1
+export GOFLAGS="-mod=mod"
 go build -v -ldflags="-s -w -X 'main.version=%{version}-%{release}'" -o %{name}
 
 # Prepara man page
@@ -133,10 +133,6 @@ install -m 644 README.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 LICENSE %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 config/resman.conf.example %{buildroot}/%{_docdir}/%{name}/
 
-# Installa documentazione TLS
-install -m 644 docs/TLS-CONFIGURATION.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
-install -m 644 docs/MULTI-INSTANCE-MONITORING.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
-install -m 644 docs/prometheus-queries.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 docs/alerting-rules.yml %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 
 # Installa script generazione certificati TLS
@@ -241,9 +237,6 @@ rmdir /var/run/resman 2>/dev/null || true
 %doc %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/CHANGELOG.md
 %doc %{_docdir}/%{name}/resman.conf.example
-%doc %{_docdir}/%{name}/TLS-CONFIGURATION.md
-%doc %{_docdir}/%{name}/MULTI-INSTANCE-MONITORING.md
-%doc %{_docdir}/%{name}/prometheus-queries.md
 %doc %{_docdir}/%{name}/alerting-rules.yml
 %doc %{_docdir}/%{name}/scripts/
 
