@@ -8,6 +8,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Force Node.js 24 to suppress deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ================================================
@@ -50,7 +52,7 @@ jobs:
             type=sha
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./packaging/docker/Dockerfile
@@ -60,6 +62,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Aggiungi dettagli su errore per debug
+          provenance: true
+          sbom: true
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0

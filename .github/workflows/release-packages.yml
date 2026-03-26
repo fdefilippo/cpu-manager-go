@@ -10,6 +10,8 @@ on:
 env:
   GO_VERSION: '1.21'
   PACKAGE_NAME: resman
+  # Force Node.js 24 to suppress deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ================================================
@@ -152,6 +154,11 @@ jobs:
           VERSION="${GITHUB_REF_NAME:-1.0.0}"
           VERSION="${VERSION#v}"  # Rimuovi prefisso 'v' se presente
 
+          # Debug: mostra HOME e crea directory
+          echo "HOME=$HOME"
+          mkdir -p $HOME/rpmbuild/SOURCES
+          mkdir -p $HOME/rpmbuild/SPECS
+
           # Crea tarball sorgente
           mkdir -p ${PACKAGE_NAME}-${VERSION}
           cp -r *.go go.mod go.sum \
@@ -160,10 +167,19 @@ jobs:
             packaging/ docs/ \
             ${PACKAGE_NAME}-${VERSION}/
 
-          tar czf ~/rpmbuild/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz ${PACKAGE_NAME}-${VERSION}
+          # Crea il tarball nella directory SOURCES
+          tar czf $HOME/rpmbuild/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz ${PACKAGE_NAME}-${VERSION}
+          rm -rf ${PACKAGE_NAME}-${VERSION}
 
-          # Build RPM
-          rpmbuild -ba packaging/rpm/${PACKAGE_NAME}.spec \
+          # Verifica tarball creato
+          echo "Tarball contents:"
+          ls -la $HOME/rpmbuild/SOURCES/
+
+          # Copia lo spec file
+          cp packaging/rpm/${PACKAGE_NAME}.spec $HOME/rpmbuild/SPECS/
+
+          # Build RPM con path assoluti
+          rpmbuild -ba $HOME/rpmbuild/SPECS/${PACKAGE_NAME}.spec \
             --define "_version ${VERSION}"
 
       - name: Collect RPM artifacts
