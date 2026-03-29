@@ -41,7 +41,7 @@ type Config struct {
 
 	// Paths
 	CgroupRoot         string `config:"CGROUP_ROOT"`
-	ScriptCgroupBase   string `config:"SCRIPT_CGROUP_BASE"`
+	CgroupBase         string `config:"CGROUP_BASE"`
 	ConfigFile         string `config:"CONFIG_FILE"` // Ricorsivo, usato all'avvio
 	LogFile            string `config:"LOG_FILE"`
 	CreatedCgroupsFile string `config:"CREATED_CGROUPS_FILE"`
@@ -52,6 +52,11 @@ type Config struct {
 	PollingInterval int `config:"POLLING_INTERVAL"`
 	MinActiveTime   int `config:"MIN_ACTIVE_TIME"`
 	MetricsCacheTTL int `config:"METRICS_CACHE_TTL"`
+
+	// Timeout (seconds/milliseconds)
+	CgroupOperationTimeout int `config:"CGROUP_OPERATION_TIMEOUT"` // Timeout for cgroup operations (seconds)
+	CgroupRetryDelayMs     int `config:"CGROUP_RETRY_DELAY_MS"`    // Delay between cgroup retry attempts (milliseconds)
+	MCPShutdownTimeout     int `config:"MCP_SHUTDOWN_TIMEOUT"`     // Timeout for MCP server shutdown (seconds)
 
 	// Thresholds (percentages)
 	CPUThreshold        int `config:"CPU_THRESHOLD"`
@@ -80,7 +85,7 @@ type Config struct {
 
 	// Prometheus
 	EnablePrometheus          bool   `config:"ENABLE_PROMETHEUS"`
-	PrometheusMetricsBindHost string `config:"PROMETHEUS_METRICS_BIND_HOST"`  // Default: 127.0.0.1 (secure)
+	PrometheusMetricsBindHost string `config:"PROMETHEUS_METRICS_BIND_HOST"` // Default: 127.0.0.1 (secure)
 	PrometheusMetricsBindPort int    `config:"PROMETHEUS_METRICS_BIND_PORT"`
 
 	// Prometheus TLS/HTTPS (optional)
@@ -161,7 +166,7 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		CgroupRoot:         "/sys/fs/cgroup",
-		ScriptCgroupBase:   "resman",
+		CgroupBase:         "resman",
 		ConfigFile:         "/etc/resman.conf",
 		LogFile:            "/var/log/resman.log",
 		CreatedCgroupsFile: "/var/run/resman-cgroups.txt",
@@ -171,6 +176,11 @@ func DefaultConfig() *Config {
 		PollingInterval: 30,
 		MinActiveTime:   60,
 		MetricsCacheTTL: 15,
+
+		// Timeout defaults
+		CgroupOperationTimeout: 5,   // 5 seconds for cgroup operations
+		CgroupRetryDelayMs:     100, // 100ms between retries
+		MCPShutdownTimeout:     10,  // 10 seconds for MCP shutdown
 
 		CPUThreshold:         75,
 		CPUReleaseThreshold:  40,
@@ -366,12 +376,12 @@ func setConfigField(cfg *Config, key, value string) error {
 	// Paths
 	case "CGROUP_ROOT":
 		cfg.CgroupRoot = value
-	case "SCRIPT_CGROUP_BASE":
+	case "CGROUP_BASE":
 		// SECURITY: Validate path does not contain traversal sequences
 		if strings.Contains(value, "..") || strings.HasPrefix(value, "/") {
-			return fmt.Errorf("invalid SCRIPT_CGROUP_BASE: must be a relative path without '..'")
+			return fmt.Errorf("invalid CGROUP_BASE: must be a relative path without '..'")
 		}
-		cfg.ScriptCgroupBase = value
+		cfg.CgroupBase = value
 	case "CONFIG_FILE":
 		cfg.ConfigFile = value
 	case "LOG_FILE":
@@ -921,7 +931,7 @@ func (c *Config) IsUserExcludedForRAM(username string) bool {
 
 // IsUserWhitelistedForRAM verifica se un utente può essere limitato per RAM
 func (c *Config) IsUserWhitelistedForRAM(username string) bool {
-	return !c.IsUserExcludedForRAM(username)
+	return c.IsUserIncludedForRAM(username) && !c.IsUserExcludedForRAM(username)
 }
 
 // SetUserExcludeList imposta la lista di utenti da escludere e salva su file
@@ -1289,3 +1299,142 @@ func (c *Config) GetNextBlackoutEnd() *time.Time {
 	return nil
 }
 
+// ============================================================================
+// THREAD-SAFE GETTERS
+// ============================================================================
+// These methods provide thread-safe access to configuration fields.
+// Use these instead of direct field access to prevent race conditions
+// during configuration reload.
+
+// GetMetricsCacheTTL returns the metrics cache TTL in seconds.
+func (c *Config) GetMetricsCacheTTL() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.MetricsCacheTTL
+}
+
+// GetSystemUIDMin returns the minimum UID to monitor.
+func (c *Config) GetSystemUIDMin() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SystemUIDMin
+}
+
+// GetSystemUIDMax returns the maximum UID to monitor.
+func (c *Config) GetSystemUIDMax() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SystemUIDMax
+}
+
+// GetCPUThreshold returns the CPU activation threshold percentage.
+func (c *Config) GetCPUThreshold() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CPUThreshold
+}
+
+// GetCPUReleaseThreshold returns the CPU deactivation threshold percentage.
+func (c *Config) GetCPUReleaseThreshold() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CPUReleaseThreshold
+}
+
+// GetCPUThresholdDuration returns the threshold duration in seconds.
+func (c *Config) GetCPUThresholdDuration() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CPUThresholdDuration
+}
+
+// GetMinActiveTime returns the minimum active time in seconds.
+func (c *Config) GetMinActiveTime() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.MinActiveTime
+}
+
+// GetPollingInterval returns the polling interval in seconds.
+func (c *Config) GetPollingInterval() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PollingInterval
+}
+
+// GetCgroupOperationTimeout returns the cgroup operation timeout in seconds.
+func (c *Config) GetCgroupOperationTimeout() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CgroupOperationTimeout
+}
+
+// GetCgroupRetryDelayMs returns the cgroup retry delay in milliseconds.
+func (c *Config) GetCgroupRetryDelayMs() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CgroupRetryDelayMs
+}
+
+// GetMCPShutdownTimeout returns the MCP shutdown timeout in seconds.
+func (c *Config) GetMCPShutdownTimeout() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.MCPShutdownTimeout
+}
+
+// GetMinSystemCores returns the minimum system cores to keep available.
+func (c *Config) GetMinSystemCores() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.MinSystemCores
+}
+
+// GetIgnoreSystemLoad returns whether to ignore system load in decisions.
+func (c *Config) GetIgnoreSystemLoad() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IgnoreSystemLoad
+}
+
+// GetUserIncludeList returns a copy of the user include list.
+func (c *Config) GetUserIncludeList() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.UserIncludeList == nil {
+		return nil
+	}
+	copy := make([]string, len(c.UserIncludeList))
+	for i, v := range c.UserIncludeList {
+		copy[i] = v
+	}
+	return copy
+}
+
+// GetUserExcludeList returns a copy of the user exclude list.
+func (c *Config) GetUserExcludeList() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.UserExcludeList == nil {
+		return nil
+	}
+	copy := make([]string, len(c.UserExcludeList))
+	for i, v := range c.UserExcludeList {
+		copy[i] = v
+	}
+	return copy
+}
+
+// GetProcessExcludeList returns a copy of the process exclude list.
+func (c *Config) GetProcessExcludeList() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.ProcessExcludeList == nil {
+		return nil
+	}
+	copy := make([]string, len(c.ProcessExcludeList))
+	for i, v := range c.ProcessExcludeList {
+		copy[i] = v
+	}
+	return copy
+}

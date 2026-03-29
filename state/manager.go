@@ -132,7 +132,7 @@ func NewManager(
 ) (*Manager, error) {
 
 	if cfg == nil {
-		return nil, fmt.Errorf("config cannot be nil")
+		return nil, fmt.Errorf("config cannot be nil: required for state manager initialization")
 	}
 
 	logger := logging.GetLogger()
@@ -188,8 +188,11 @@ func (m *Manager) RunControlCycle(ctx context.Context) error {
 	// 1. Raccogli metriche del sistema
 	metrics, err := m.collectSystemMetrics()
 	if err != nil {
-		m.logger.Error("Failed to collect system metrics", "error", err)
-		return err
+		m.logger.Error("Failed to collect system metrics",
+			"cycle_id", cycleID,
+			"error", err,
+		)
+		return fmt.Errorf("failed to collect system metrics (cycle %d): %w", cycleID, err)
 	}
 
 	// 2. Aggiorna le metriche Prometheus (se abilitato)
@@ -207,9 +210,11 @@ func (m *Manager) RunControlCycle(ctx context.Context) error {
 	if err := m.executeDecision(decision, metrics); err != nil {
 		m.logger.Error("Failed to execute decision",
 			"decision", decision,
+			"reason", reason,
+			"cycle_id", cycleID,
 			"error", err,
 		)
-		return err
+		return fmt.Errorf("failed to execute decision %s (cycle %d): %w", decision, cycleID, err)
 	}
 
 	// 6. Registra lo storico del ciclo
@@ -298,6 +303,14 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 	limitsAppliedTime := m.limitsAppliedTime
 	m.mu.RUnlock()
 
+	// Get configuration values atomically to prevent inconsistency during reload
+	minActiveTime := m.cfg.GetMinActiveTime()
+	cpuReleaseThreshold := m.cfg.GetCPUReleaseThreshold()
+	cpuThreshold := m.cfg.GetCPUThreshold()
+	minSystemCores := m.cfg.GetMinSystemCores()
+	ignoreSystemLoad := m.cfg.GetIgnoreSystemLoad()
+	cpuThresholdDuration := m.cfg.GetCPUThresholdDuration()
+
 	// Decisioni possibili
 	const (
 		DecisionActivate   = "ACTIVATE_LIMITS"
@@ -308,12 +321,12 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 	// Se i limiti sono attivi, controlliamo se possiamo disattivarli
 	if limitsActive {
 		// Verifica il tempo minimo di attivazione
-		if time.Since(limitsAppliedTime) < time.Duration(m.cfg.MinActiveTime)*time.Second {
+		if time.Since(limitsAppliedTime) < time.Duration(minActiveTime)*time.Second {
 			return DecisionMaintain, "Limits active, waiting for minimum activation time"
 		}
 
 		// Verifica se l'uso della CPU è sceso sotto la soglia di rilascio
-		if metrics.LimitedUsersCPUUsage < float64(m.cfg.CPUReleaseThreshold) {
+		if metrics.LimitedUsersCPUUsage < float64(cpuReleaseThreshold) {
 			// Verifica anche che il sistema non sia sotto carico
 			if !metrics.SystemUnderLoad {
 				// Reset tracker quando i limiti vengono rilasciati
@@ -321,7 +334,7 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 
 				return DecisionDeactivate, fmt.Sprintf(
 					"CPU usage below release threshold (%.1f%% < %d%%) and system not under load",
-					metrics.LimitedUsersCPUUsage, m.cfg.CPUReleaseThreshold,
+					metrics.LimitedUsersCPUUsage, cpuReleaseThreshold,
 				)
 			}
 			return DecisionMaintain, "CPU usage below threshold but system still under load"
@@ -332,45 +345,45 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 
 	// Se i limiti non sono attivi, controlliamo se dobbiamo attivarli
 	// 1. Verifica soglia CPU
-	if metrics.LimitedUsersCPUUsage >= float64(m.cfg.CPUThreshold) {
+	if metrics.LimitedUsersCPUUsage >= float64(cpuThreshold) {
 		// 2. Verifica che ci siano abbastanza core per il sistema
-		if metrics.TotalCores <= m.cfg.MinSystemCores {
+		if metrics.TotalCores <= minSystemCores {
 			m.thresholdTracker.Reset()
 			return DecisionMaintain, fmt.Sprintf(
 				"CPU usage high (%.1f%% >= %d%%) but insufficient cores (%d <= %d)",
-				metrics.LimitedUsersCPUUsage, m.cfg.CPUThreshold,
-				metrics.TotalCores, m.cfg.MinSystemCores,
+				metrics.LimitedUsersCPUUsage, cpuThreshold,
+				metrics.TotalCores, minSystemCores,
 			)
 		}
 
 		// 3. Verifica se dobbiamo ignorare il load average
-		if !m.cfg.IgnoreSystemLoad && metrics.SystemUnderLoad {
+		if !ignoreSystemLoad && metrics.SystemUnderLoad {
 			m.thresholdTracker.Reset()
 			return DecisionMaintain, "CPU usage high but system already under load from other factors"
 		}
 
 		// 4. Verifica time window (se configurata)
-		if m.cfg.CPUThresholdDuration > 0 {
+		if cpuThresholdDuration > 0 {
 			shouldActivate := m.thresholdTracker.ShouldActivateLimits(
 				metrics.LimitedUsersCPUUsage,
-				float64(m.cfg.CPUThreshold),
-				time.Duration(m.cfg.CPUThresholdDuration)*time.Second,
+				float64(cpuThreshold),
+				time.Duration(cpuThresholdDuration)*time.Second,
 			)
 
 			if !shouldActivate {
 				elapsed := m.thresholdTracker.GetElapsed()
-				remaining := time.Duration(m.cfg.CPUThresholdDuration)*time.Second - elapsed
+				remaining := time.Duration(cpuThresholdDuration)*time.Second - elapsed
 				return DecisionMaintain, fmt.Sprintf(
 					"CPU threshold exceeded, waiting %s before activating limits (%.1f%% >= %d%%)",
 					remaining.Round(time.Second),
-					metrics.LimitedUsersCPUUsage, m.cfg.CPUThreshold,
+					metrics.LimitedUsersCPUUsage, cpuThreshold,
 				)
 			}
 		}
 
 		return DecisionActivate, fmt.Sprintf(
 			"CPU usage exceeded threshold (%.1f%% >= %d%%)",
-			metrics.LimitedUsersCPUUsage, m.cfg.CPUThreshold,
+			metrics.LimitedUsersCPUUsage, cpuThreshold,
 		)
 	}
 
@@ -390,7 +403,7 @@ func (m *Manager) executeDecision(decision string, metrics *SystemMetrics) error
 		// Controlla se ci sono utenti inattivi da rilasciare
 		return m.releaseIdleUsers(metrics)
 	default:
-		return fmt.Errorf("unknown decision: %s", decision)
+		return fmt.Errorf("unknown decision '%s': expected ACTIVATE_LIMITS, DEACTIVATE_LIMITS, or MAINTAIN_CURRENT_STATE", decision)
 	}
 }
 
@@ -458,6 +471,7 @@ func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 		if err := m.cgroupManager.ApplyCPULimit(uid, m.cfg.CPUQuotaNormal); err != nil {
 			m.logger.Error("Failed to restore normal CPU limit for idle user",
 				"uid", uid,
+				"quota", m.cfg.CPUQuotaNormal,
 				"error", err,
 			)
 			if firstError == nil {
@@ -467,13 +481,17 @@ func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 		}
 
 		releasedCount++
-		m.logger.Debug("CPU limit removed for idle user", "uid", uid)
+		m.logger.Debug("CPU limit removed for idle user",
+			"uid", uid,
+			"quota", m.cfg.CPUQuotaNormal,
+		)
 	}
 
 	// Logga il risultato
 	m.logger.Info("Idle user release completed",
 		"released", releasedCount,
 		"remaining_limited", remainingLimited,
+		"quota_restored", m.cfg.CPUQuotaNormal,
 	)
 
 	return firstError
@@ -524,7 +542,7 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 		// Crea il cgroup condiviso
 		sharedPath, err := m.cgroupManager.CreateSharedCgroup()
 		if err != nil {
-			return fmt.Errorf("failed to create shared cgroup: %w", err)
+			return fmt.Errorf("failed to create shared cgroup (min_system_cores=%d, total_cores=%d): %w", m.cfg.MinSystemCores, metrics.TotalCores, err)
 		}
 		m.sharedCgroupPath = sharedPath
 
@@ -540,7 +558,7 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 
 		// Applica la quota al cgroup condiviso
 		if err := m.cgroupManager.ApplySharedCPULimit(sharedPath, sharedQuota); err != nil {
-			return fmt.Errorf("failed to apply shared CPU limit: %w", err)
+			return fmt.Errorf("failed to apply shared CPU limit %s to %s: %w", sharedQuota, sharedPath, err)
 		}
 
 		m.logger.Info("Shared cgroup configured",
@@ -553,8 +571,22 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 	}
 
 	// Fase 3: Configura i sottocgroup per gli utenti attuali
+	// CORREZIONE: Itera solo sugli utenti che possono essere limitati
 	for uid := range metrics.UserCPUUsage {
 		username := m.getUsername(uid)
+		
+		// Salta utenti che non possono essere limitati
+		// Un utente può essere limitato se: è incluso (se include list configurata) E non è escluso
+		if !m.cfg.IsUserIncluded(username) || m.cfg.IsUserExcluded(username) {
+			m.logger.Debug("Skipping user - not in include list or in exclude list",
+				"uid", uid,
+				"username", username,
+				"is_included", m.cfg.IsUserIncluded(username),
+				"is_excluded", m.cfg.IsUserExcluded(username),
+			)
+			continue
+		}
+		
 		userStr := fmt.Sprintf("%s(%d)", username, uid)
 		// Verifica se l'utente è già limitato
 		m.mu.RLock()
@@ -567,6 +599,7 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 			if err != nil {
 				m.logger.Error("Failed to create user sub-cgroup",
 					"user", userStr,
+					"shared_cgroup", m.sharedCgroupPath,
 					"error", err,
 				)
 				if firstError == nil {
@@ -588,6 +621,8 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 				if err := m.cgroupManager.MoveAllUserProcessesToSharedCgroup(uid, m.sharedCgroupPath); err != nil {
 					m.logger.Warn("Failed to move some processes to shared cgroup",
 						"uid", uid,
+						"username", username,
+						"shared_cgroup", m.sharedCgroupPath,
 						"error", err,
 					)
 				}
@@ -596,6 +631,8 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 				if err := m.cgroupManager.ApplyCPUWeight(uid, weight); err != nil {
 					m.logger.Warn("Failed to set CPU weight for user, using default",
 						"uid", uid,
+						"username", username,
+						"weight", weight,
 						"error", err,
 					)
 				}
