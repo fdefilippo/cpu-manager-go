@@ -39,6 +39,9 @@ type Timeframe struct {
 type Config struct {
 	mu sync.RWMutex
 
+	// Regex cache for pre-compiled patterns (performance optimization)
+	regexCache sync.Map // map[string]*regexp.Regexp
+
 	// Paths
 	CgroupRoot         string `config:"CGROUP_ROOT"`
 	CgroupBase         string `config:"CGROUP_BASE"`
@@ -85,18 +88,40 @@ type Config struct {
 	RAMUserExcludeList []string `config:"RAM_USER_EXCLUDE_LIST"`
 
 	// IO limits (block I/O via cgroups v2 io controller)
-	IOEnabled          bool   `config:"IO_LIMIT_ENABLED"`
-	IOThreshold        int    `config:"IO_THRESHOLD"`
-	IOReleaseThreshold int    `config:"IO_RELEASE_THRESHOLD"`
-	IOReadBPS          string `config:"IO_READ_BPS"`      // Read bandwidth limit (e.g., "100M", "1G")
-	IOWriteBPS         string `config:"IO_WRITE_BPS"`     // Write bandwidth limit (e.g., "50M", "500M")
-	IOReadIOPS         int    `config:"IO_READ_IOPS"`     // Read IOPS limit (0 = unlimited)
-	IOWriteIOPS        int    `config:"IO_WRITE_IOPS"`    // Write IOPS limit (0 = unlimited)
-	IODeviceFilter     string `config:"IO_DEVICE_FILTER"` // "all" or "major:minor" (default "all")
+	IOEnabled           bool   `config:"IO_LIMIT_ENABLED"`
+	IOThreshold         int    `config:"IO_THRESHOLD"`
+	IOReleaseThreshold  int    `config:"IO_RELEASE_THRESHOLD"`
+	IOReadBPS           string `config:"IO_READ_BPS"`           // Read bandwidth limit (e.g., "100M", "1G")
+	IOWriteBPS          string `config:"IO_WRITE_BPS"`          // Write bandwidth limit (e.g., "50M", "500M")
+	IOReadIOPS          int    `config:"IO_READ_IOPS"`          // Read IOPS limit (0 = unlimited)
+	IOWriteIOPS         int    `config:"IO_WRITE_IOPS"`         // Write IOPS limit (0 = unlimited)
+	IODeviceFilter      string `config:"IO_DEVICE_FILTER"`      // "all" or "major:minor" (default "all")
+	IOThresholdDuration int    `config:"IO_THRESHOLD_DURATION"` // Seconds to wait before activating IO limits (0 = immediate)
+
+	// IO Starvation Auto-Remediation
+	IORemediationEnabled      bool    `config:"IO_REMEDIATION_ENABLED"`
+	IOStarvationThreshold     int     `config:"IO_STARVATION_THRESHOLD"`      // Seconds of continuous throttling before remediation
+	IOStarvationCheckInterval int     `config:"IO_STARVATION_CHECK_INTERVAL"` // Check frequency in seconds
+	IOBoostMultiplier         float64 `config:"IO_BOOST_MULTIPLIER"`          // Multiplier for temporary limits
+	IOBoostDuration           int     `config:"IO_BOOST_DURATION"`            // Duration of boost in seconds
+	IOBoostMaxPerHour         int     `config:"IO_BOOST_MAX_PER_HOUR"`        // Max boosts per user per hour
+	IOPSIThreshold            float64 `config:"IO_PSI_THRESHOLD"`             // PSI some avg10 % threshold
+	IORevertOnNormal          bool    `config:"IO_REVERT_ON_NORMAL"`          // Revert limits when IO returns to normal
 
 	// IO User Include/Exclude Lists (regex support)
 	IOUserIncludeList []string `config:"IO_USER_INCLUDE_LIST"`
 	IOUserExcludeList []string `config:"IO_USER_EXCLUDE_LIST"`
+
+	// Workload Pattern Detection (auto-detect user patterns)
+	AutodetectPatterns         bool    `config:"AUTODETECT_PATTERNS"`
+	PatternHistoryHours        int     `config:"PATTERN_HISTORY_HOURS"`        // Finestra storica (ore)
+	PatternMinSamples          int     `config:"PATTERN_MIN_SAMPLES"`          // Minimo campioni per decidere
+	PatternConfidenceThreshold float64 `config:"PATTERN_CONFIDENCE_THRESHOLD"` // Soglia confidenza (0.0-1.0)
+	// Policy per pattern
+	BatchNightCPUQuota  int    `config:"BATCH_NIGHT_CPU_QUOTA"` // CPU quota per batch (microseconds)
+	BatchNightRAMQuota  string `config:"BATCH_NIGHT_RAM_QUOTA"` // RAM quota per batch
+	InteractiveCPUQuota int    `config:"INTERACTIVE_CPU_QUOTA"` // CPU quota per interattivo
+	InteractiveRAMQuota string `config:"INTERACTIVE_RAM_QUOTA"` // RAM quota per interattivo
 
 	// Prometheus
 	EnablePrometheus          bool   `config:"ENABLE_PROMETHEUS"`
@@ -215,16 +240,38 @@ func DefaultConfig() *Config {
 		RAMUserExcludeList:  nil,
 
 		// IO limits
-		IOEnabled:          false,
-		IOThreshold:        75,
-		IOReleaseThreshold: 40,
-		IOReadBPS:          "100M", // 100 MB/s
-		IOWriteBPS:         "50M",  // 50 MB/s
-		IOReadIOPS:         1000,
-		IOWriteIOPS:        500,
-		IODeviceFilter:     "all",
-		IOUserIncludeList:  nil,
-		IOUserExcludeList:  nil,
+		IOEnabled:           false,
+		IOThreshold:         75,
+		IOReleaseThreshold:  40,
+		IOReadBPS:           "100M", // 100 MB/s
+		IOWriteBPS:          "50M",  // 50 MB/s
+		IOReadIOPS:          1000,
+		IOWriteIOPS:         500,
+		IODeviceFilter:      "all",
+		IOThresholdDuration: 0, // 0 = immediate (no duration check)
+
+		// IO Starvation Auto-Remediation
+		IORemediationEnabled:      false,
+		IOStarvationThreshold:     300, // 5 minutes
+		IOStarvationCheckInterval: 30,  // 30 seconds
+		IOBoostMultiplier:         2.0, // 2x limits
+		IOBoostDuration:           600, // 10 minutes
+		IOBoostMaxPerHour:         3,
+		IOPSIThreshold:            50.0, // 50%
+		IORevertOnNormal:          true,
+
+		IOUserIncludeList: nil,
+		IOUserExcludeList: nil,
+
+		// Workload Pattern Detection
+		AutodetectPatterns:         false,
+		PatternHistoryHours:        168, // 7 days
+		PatternMinSamples:          24,  // 24 hours minimum
+		PatternConfidenceThreshold: 0.7,
+		BatchNightCPUQuota:         200000, // 200% (2 cores)
+		BatchNightRAMQuota:         "4G",
+		InteractiveCPUQuota:        50000, // 50%
+		InteractiveRAMQuota:        "1G",
 
 		EnablePrometheus:          false,
 		PrometheusMetricsBindHost: "127.0.0.1", // Default: localhost only (secure)
@@ -293,7 +340,10 @@ func LoadAndValidate(configPath string) (*Config, error) {
 	}
 
 	// 2. Sovrascrivi con le variabili d'ambiente
-	loadFromEnvironment(cfg)
+	warnings := loadFromEnvironment(cfg)
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
+	}
 
 	// 3. Valida
 	if err := validateConfig(cfg); err != nil {
@@ -352,9 +402,11 @@ func loadFromFile(path string, cfg *Config) error {
 }
 
 // loadFromEnvironment sovrascrive i valori con le variabili d'ambiente.
-func loadFromEnvironment(cfg *Config) {
-	cfgType := reflect.TypeOf(*cfg)
+// Restituisce una lista di warning per valori non parsabili.
+func loadFromEnvironment(cfg *Config) []string {
+	cfgType := reflect.TypeOf(cfg).Elem()
 	cfgValue := reflect.ValueOf(cfg).Elem()
+	var warnings []string
 
 	for i := 0; i < cfgType.NumField(); i++ {
 		field := cfgType.Field(i)
@@ -383,6 +435,8 @@ func loadFromEnvironment(cfg *Config) {
 		case reflect.Int:
 			if intVal, err := strconv.Atoi(envValue); err == nil {
 				fieldValue.SetInt(int64(intVal))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("Invalid integer for %s=%q, using default value %d", envKey, envValue, fieldValue.Int()))
 			}
 		case reflect.Bool:
 			lowerVal := strings.ToLower(envValue)
@@ -392,10 +446,14 @@ func loadFromEnvironment(cfg *Config) {
 				boolVal = true
 			case "false", "0", "no", "off":
 				boolVal = false
+			default:
+				warnings = append(warnings, fmt.Sprintf("Invalid boolean for %s=%q, using default value %v", envKey, envValue, fieldValue.Bool()))
 			}
 			fieldValue.SetBool(boolVal)
 		}
 	}
+
+	return warnings
 }
 
 // setConfigField imposta il valore di un campo nella struct Config basandosi sul tag `config`.
@@ -787,10 +845,10 @@ func validateConfig(cfg *Config) error {
 		if cfg.RAMThreshold <= cfg.RAMReleaseThreshold {
 			errors = append(errors, "RAM_THRESHOLD must be greater than RAM_RELEASE_THRESHOLD")
 		}
-		if !isValidRAMQuota(cfg.RAMQuotaLimited) {
+		if !isValidByteQuota(cfg.RAMQuotaLimited) {
 			errors = append(errors, "RAM_QUOTA_LIMITED must be a valid byte value (e.g., '1073741824', '512M', '1G')")
 		}
-		if !isValidRAMQuota(cfg.RAMQuotaPerUser) {
+		if !isValidByteQuota(cfg.RAMQuotaPerUser) {
 			errors = append(errors, "RAM_QUOTA_PER_USER must be a valid byte value (e.g., '536870912', '512M', '1G')")
 		}
 		if cfg.RAMHighRatio < 0 || cfg.RAMHighRatio > 1 {
@@ -810,12 +868,12 @@ func validateConfig(cfg *Config) error {
 			errors = append(errors, "IO_THRESHOLD must be greater than IO_RELEASE_THRESHOLD")
 		}
 		if cfg.IOReadBPS != "" && cfg.IOReadBPS != "max" {
-			if !isValidRAMQuota(cfg.IOReadBPS) {
+			if !isValidByteQuota(cfg.IOReadBPS) {
 				errors = append(errors, "IO_READ_BPS must be a valid byte value (e.g., '104857600', '100M', '1G')")
 			}
 		}
 		if cfg.IOWriteBPS != "" && cfg.IOWriteBPS != "max" {
-			if !isValidRAMQuota(cfg.IOWriteBPS) {
+			if !isValidByteQuota(cfg.IOWriteBPS) {
 				errors = append(errors, "IO_WRITE_BPS must be a valid byte value (e.g., '52428800', '50M', '500M')")
 			}
 		}
@@ -863,9 +921,9 @@ func isValidCPUQuota(quota string) bool {
 	return err1 == nil && err2 == nil
 }
 
-// isValidRAMQuota verifica il formato del limite RAM.
+// isValidByteQuota verifica il formato di una quota in byte.
 // Formati validi: bytes (es. "1073741824"), K/M/G/T (es. "512M", "1G")
-func isValidRAMQuota(quota string) bool {
+func isValidByteQuota(quota string) bool {
 	if quota == "" {
 		return false
 	}
@@ -907,6 +965,27 @@ func ParseRAMQuota(quota string) (uint64, error) {
 	return val, nil
 }
 
+// matchPattern checks if a string matches a regex pattern, using a cache
+// to avoid recompiling the same pattern repeatedly.
+func (c *Config) matchPattern(pattern, s string) bool {
+	// Try to load from cache
+	if val, ok := c.regexCache.Load(pattern); ok {
+		if re, ok := val.(*regexp.Regexp); ok {
+			return re.MatchString(s)
+		}
+	}
+
+	// Not in cache or invalid type, compile regex
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false // Invalid pattern, no match
+	}
+
+	// Store in cache (if another goroutine stored concurrently, LoadOrStore returns existing)
+	stored, _ := c.regexCache.LoadOrStore(pattern, re)
+	return stored.(*regexp.Regexp).MatchString(s)
+}
+
 // IsUserIncluded verifica se un username corrisponde ai pattern della include list
 // Se la include list è nil o vuota, tutti gli utenti sono inclusi
 func (c *Config) IsUserIncluded(username string) bool {
@@ -917,7 +996,7 @@ func (c *Config) IsUserIncluded(username string) bool {
 
 	// Altrimenti, controlla se lo username corrisponde a uno dei pattern regex
 	for _, pattern := range c.UserIncludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true // User matches include pattern
 		}
 	}
@@ -934,7 +1013,7 @@ func (c *Config) IsUserExcluded(username string) bool {
 
 	// Altrimenti, controlla se lo username corrisponde a uno dei pattern regex
 	for _, pattern := range c.UserExcludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true // User matches exclude pattern
 		}
 	}
@@ -956,7 +1035,7 @@ func (c *Config) IsProcessExcluded(processName string) bool {
 		return false // No processes excluded
 	}
 	for _, pattern := range c.ProcessExcludeList {
-		if matched, _ := regexp.MatchString(pattern, processName); matched {
+		if c.matchPattern(pattern, processName) {
 			return true
 		}
 	}
@@ -969,7 +1048,7 @@ func (c *Config) IsUserIncludedForRAM(username string) bool {
 		return true
 	}
 	for _, pattern := range c.RAMUserIncludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true
 		}
 	}
@@ -982,7 +1061,7 @@ func (c *Config) IsUserExcludedForRAM(username string) bool {
 		return false
 	}
 	for _, pattern := range c.RAMUserExcludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true
 		}
 	}
@@ -1001,7 +1080,7 @@ func (c *Config) IsUserIncludedForIO(username string) bool {
 		return true
 	}
 	for _, pattern := range c.IOUserIncludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true
 		}
 	}
@@ -1015,7 +1094,7 @@ func (c *Config) IsUserExcludedForIO(username string) bool {
 		return false
 	}
 	for _, pattern := range c.IOUserExcludeList {
-		if matched, _ := regexp.MatchString(pattern, username); matched {
+		if c.matchPattern(pattern, username) {
 			return true
 		}
 	}
@@ -1534,6 +1613,125 @@ func (c *Config) GetIODeviceFilter() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.IODeviceFilter
+}
+
+// GetIOThresholdDuration returns the IO threshold duration in seconds.
+func (c *Config) GetIOThresholdDuration() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOThresholdDuration
+}
+
+// GetIORemediationEnabled returns whether IO starvation remediation is enabled.
+func (c *Config) GetIORemediationEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IORemediationEnabled
+}
+
+// GetIOStarvationThreshold returns the starvation threshold in seconds.
+func (c *Config) GetIOStarvationThreshold() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOStarvationThreshold
+}
+
+// GetIOStarvationCheckInterval returns the check interval in seconds.
+func (c *Config) GetIOStarvationCheckInterval() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOStarvationCheckInterval
+}
+
+// GetIOBoostMultiplier returns the boost multiplier.
+func (c *Config) GetIOBoostMultiplier() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOBoostMultiplier
+}
+
+// GetIOBoostDuration returns the boost duration in seconds.
+func (c *Config) GetIOBoostDuration() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOBoostDuration
+}
+
+// GetIOBoostMaxPerHour returns the max boosts per user per hour.
+func (c *Config) GetIOBoostMaxPerHour() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOBoostMaxPerHour
+}
+
+// GetIOPSIThreshold returns the PSI threshold percentage.
+func (c *Config) GetIOPSIThreshold() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IOPSIThreshold
+}
+
+// GetIORevertOnNormal returns whether to revert limits when IO returns to normal.
+func (c *Config) GetIORevertOnNormal() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IORevertOnNormal
+}
+
+// GetAutodetectPatterns returns whether workload pattern detection is enabled.
+func (c *Config) GetAutodetectPatterns() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AutodetectPatterns
+}
+
+// GetPatternHistoryHours returns the pattern history window in hours.
+func (c *Config) GetPatternHistoryHours() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PatternHistoryHours
+}
+
+// GetPatternMinSamples returns the minimum samples required for pattern detection.
+func (c *Config) GetPatternMinSamples() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PatternMinSamples
+}
+
+// GetPatternConfidenceThreshold returns the confidence threshold for pattern detection.
+func (c *Config) GetPatternConfidenceThreshold() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PatternConfidenceThreshold
+}
+
+// GetBatchNightCPUQuota returns the CPU quota for batch night pattern.
+func (c *Config) GetBatchNightCPUQuota() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BatchNightCPUQuota
+}
+
+// GetBatchNightRAMQuota returns the RAM quota for batch night pattern.
+func (c *Config) GetBatchNightRAMQuota() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BatchNightRAMQuota
+}
+
+// GetInteractiveCPUQuota returns the CPU quota for interactive pattern.
+func (c *Config) GetInteractiveCPUQuota() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.InteractiveCPUQuota
+}
+
+// GetInteractiveRAMQuota returns the RAM quota for interactive pattern.
+func (c *Config) GetInteractiveRAMQuota() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.InteractiveRAMQuota
 }
 
 // GetIgnoreSystemLoad returns whether to ignore system load in decisions.

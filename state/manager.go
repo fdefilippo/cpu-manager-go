@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fdefilippo/resman/cgroup"
 	"github.com/fdefilippo/resman/config"
 	"github.com/fdefilippo/resman/logging"
 	"github.com/fdefilippo/resman/metrics"
@@ -46,12 +47,17 @@ type Manager struct {
 	sharedCgroupPath  string       // Percorso del cgroup condiviso
 
 	// Threshold monitoring
-	thresholdTracker *ThresholdTracker
+	thresholdTracker    *ThresholdTracker
+	ioThresholdTracker  *ThresholdTracker
+	lastPatternAnalysis time.Time
 
 	// Dipendenze (saranno iniettate)
 	metricsCollector   MetricsCollector
 	cgroupManager      CgroupManager
 	prometheusExporter PrometheusExporter
+	ioRemediation      *IORemediation
+	patternDetector    *PatternDetector
+	policyEngine       *PolicyEngine
 
 	// Cache per le metriche (per performance)
 	metricsCache     map[string]interface{}
@@ -90,6 +96,7 @@ type MetricsCollector interface {
 	GetAllUserMetrics() map[int]*metrics.UserMetrics
 	GetDBWriter() *metrics.DBWriter
 	WriteMetricsToDatabase(userMetrics map[int]*metrics.UserMetrics, totalCPUUsage float64, totalCores int, systemLoad float64, limitsActive bool, limitedUsersCount int)
+	GetUsernameFromUID(uid int) string
 }
 
 // CgroupManager è l'interfaccia per gestire i cgroups.
@@ -110,6 +117,9 @@ type CgroupManager interface {
 	ApplyIOLimit(uid int, readBPS, writeBPS string, readIOPS, writeIOPS int, deviceFilter string) error
 	RemoveIOLimit(uid int) error
 	GetIOStats(uid int) (readBytes, writeBytes uint64, readOps, writeOps uint64, err error)
+	GetUserCgroupMetrics(uid int) (cgroupPath, cpuQuota string, memoryHighEvents uint64, ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps uint64, err error)
+	GetPSIStats(uid int) (cgroup.PSIStats, error)
+	ApplyTemporaryIOLimit(uid int, readBPS, writeBPS string, readIOPS, writeIOPS int, deviceFilter string, multiplier float64) error
 	CleanupUserCgroup(uid int) error
 	MoveProcessToCgroup(pid int, uid int) error
 	MoveAllUserProcessesToSharedCgroup(uid int, sharedPath string) error
@@ -155,9 +165,13 @@ func NewManager(
 		activeUsers:        make(map[int]bool),
 		sharedCgroupPath:   "",
 		thresholdTracker:   &ThresholdTracker{},
+		ioThresholdTracker: &ThresholdTracker{},
 		metricsCollector:   metrics,
 		cgroupManager:      cgroups,
 		prometheusExporter: prometheus,
+		ioRemediation:      NewIORemediation(logger),
+		patternDetector:    NewPatternDetector(logger),
+		policyEngine:       NewPolicyEngine(logger),
 		metricsCache:       make(map[string]interface{}),
 		metricsCacheTime:   make(map[string]time.Time),
 	}
@@ -231,7 +245,65 @@ func (m *Manager) RunControlCycle(ctx context.Context) error {
 	duration := time.Since(startTime)
 	m.recordControlCycle(decision, reason, metrics, duration)
 
-	// 5. Logga il risultato del ciclo
+	// 7. IO Starvation Auto-Remediation
+	if m.ioRemediation != nil {
+		limitedUsers := m.metricsCollector.GetLimitedUsers()
+		m.ioRemediation.CheckAndRemediate(m.cgroupManager, m.cfg, limitedUsers)
+		// Cleanup periodico stati vecchi
+		m.ioRemediation.Cleanup(24 * time.Hour)
+	}
+
+	// 8. Workload Pattern Detection
+	if m.cfg.GetAutodetectPatterns() && m.patternDetector != nil && m.policyEngine != nil {
+		// Aggiorna statistiche per tutti gli utenti
+		allMetrics := m.metricsCollector.GetAllUserMetrics()
+		for uid, um := range allMetrics {
+			m.patternDetector.Update(uid, um.CPUUsage)
+		}
+
+		// Analizza pattern ogni ora
+		if time.Since(m.lastPatternAnalysis) > time.Hour {
+			m.lastPatternAnalysis = time.Now()
+			patterns := m.patternDetector.Analyze(m.cfg)
+			for uid, result := range patterns {
+				if result.Pattern != PatternUnknown {
+					if m.policyEngine.ApplyPolicy(uid, result.Pattern, m.cfg) {
+						// Policy cambiata, applica limiti
+						policy, _ := m.policyEngine.GetPolicy(uid)
+						if policy != nil {
+							// Applica CPU quota
+							if policy.CPUQuota > 0 {
+								quotaStr := strconv.Itoa(policy.CPUQuota) + " 100000"
+								if err := m.cgroupManager.ApplyCPULimit(uid, quotaStr); err != nil {
+									m.logger.Warn("Failed to apply pattern-based CPU limit",
+										"uid", uid,
+										"pattern", result.Pattern,
+										"error", err,
+									)
+								}
+							}
+							// Applica RAM quota
+							if policy.RAMQuota != "" {
+								if err := m.cgroupManager.ApplyRAMLimit(uid, policy.RAMQuota); err != nil {
+									m.logger.Warn("Failed to apply pattern-based RAM limit",
+										"uid", uid,
+										"pattern", result.Pattern,
+										"ram_quota", policy.RAMQuota,
+										"error", err,
+									)
+								}
+							}
+						}
+					}
+				}
+			}
+			// Cleanup pattern detector
+			m.patternDetector.Cleanup(time.Duration(m.cfg.GetPatternHistoryHours()) * time.Hour)
+			m.policyEngine.Cleanup(24 * time.Hour)
+		}
+	}
+
+	// 9. Logga il risultato del ciclo
 	m.logger.Info("Control cycle completed",
 		"cycle_id", cycleID,
 		"decision", decision,
@@ -359,15 +431,33 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 	}
 
 	ioExceeded := false
+	ioPercent := 0.0
+	ioThresholdDuration := m.cfg.GetIOThresholdDuration()
 	if m.cfg.IOEnabled && m.cfg.IOThreshold > 0 && m.cfg.IOWriteBPS != "" && m.cfg.IOWriteBPS != "max" {
 		writeLimit, err := config.ParseRAMQuota(m.cfg.IOWriteBPS)
 		if err == nil && writeLimit > 0 {
 			totalWriteLimit := writeLimit * uint64(metrics.LimitedUsersCount)
 			if totalWriteLimit > 0 {
-				ioPercent := float64(metrics.LimitedUsersIOWriteBytes) / float64(totalWriteLimit) * 100
+				ioPercent = float64(metrics.LimitedUsersIOWriteBytes) / float64(totalWriteLimit) * 100
 				ioExceeded = ioPercent >= float64(m.cfg.IOThreshold)
 			}
 		}
+	}
+
+	// Applica IO threshold duration se configurata
+	if ioThresholdDuration > 0 && ioExceeded {
+		ioTrackerReady := m.ioThresholdTracker.ShouldActivateLimits(
+			ioPercent,
+			float64(m.cfg.IOThreshold),
+			time.Duration(ioThresholdDuration)*time.Second,
+		)
+		if !ioTrackerReady {
+			// IO sopra soglia ma non ancora per abbastanza tempo
+			ioExceeded = false
+		}
+	} else {
+		// IO sotto soglia o duration disabilitata: reset tracker
+		m.ioThresholdTracker.Reset()
 	}
 
 	anyExceeded := cpuExceeded || ramExceeded || ioExceeded
@@ -407,6 +497,7 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 		if allBelow {
 			if !metrics.SystemUnderLoad {
 				m.thresholdTracker.Reset()
+				m.ioThresholdTracker.Reset()
 				return DecisionDeactivate, m.buildDeactivateReason(cpuBelow, ramBelow, ioBelow, metrics, cpuReleaseThreshold)
 			}
 			return DecisionMaintain, "Resources below thresholds but system still under load"
@@ -420,6 +511,7 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 		// Verifica che ci siano abbastanza core per il sistema
 		if metrics.TotalCores <= minSystemCores {
 			m.thresholdTracker.Reset()
+			m.ioThresholdTracker.Reset()
 			return DecisionMaintain, fmt.Sprintf(
 				"Threshold exceeded but insufficient cores (%d <= %d)",
 				metrics.TotalCores, minSystemCores,
@@ -429,17 +521,20 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 		// Verifica se dobbiamo ignorare il load average
 		if !ignoreSystemLoad && metrics.SystemUnderLoad {
 			m.thresholdTracker.Reset()
+			m.ioThresholdTracker.Reset()
 			return DecisionMaintain, "Threshold exceeded but system already under load from other factors"
 		}
 
 		// Verifica time window (solo per CPU, se configurata)
+		// Blocca l'attivazione solo se CPU è l'unica risorsa sopra soglia
 		if cpuExceeded && cpuThresholdDuration > 0 {
 			shouldActivate := m.thresholdTracker.ShouldActivateLimits(
 				metrics.LimitedUsersCPUUsage,
 				float64(cpuThreshold),
 				time.Duration(cpuThresholdDuration)*time.Second,
 			)
-			if !shouldActivate {
+			if !shouldActivate && !ramExceeded && !ioExceeded {
+				// Solo CPU sopra soglia e non ancora per abbastanza tempo
 				elapsed := m.thresholdTracker.GetElapsed()
 				remaining := time.Duration(cpuThresholdDuration)*time.Second - elapsed
 				return DecisionMaintain, fmt.Sprintf(
@@ -455,6 +550,7 @@ func (m *Manager) makeDecision(metrics *SystemMetrics) (string, string) {
 
 	// Nessuna risorsa supera la soglia, reset tracker
 	m.thresholdTracker.Reset()
+	m.ioThresholdTracker.Reset()
 	return DecisionMaintain, "All resources within normal range"
 }
 
@@ -510,16 +606,8 @@ func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 
 	for uid := range m.activeUsers {
 		// Controlla se l'utente è ancora attivo (ha processi in esecuzione)
-		userStillActive := false
-		for activeUID := range metrics.UserCPUUsage {
-			if activeUID == uid {
-				userStillActive = true
-				break
-			}
-		}
-
-		if !userStillActive {
-			// Utente non più nella lista attivi
+		// O(1) lookup instead of O(N*M) linear search
+		if _, userStillActive := metrics.UserCPUUsage[uid]; !userStillActive {
 			usersToRelease = append(usersToRelease, uid)
 			continue
 		}
@@ -662,7 +750,8 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 	// Fase 3: Configura i sottocgroup per gli utenti attuali
 	// CORREZIONE: Itera solo sugli utenti che possono essere limitati
 	for uid := range metrics.UserCPUUsage {
-		username := m.getUsername(uid)
+		// Use real username from collector (supports LDAP/NIS with CGO)
+		username := m.metricsCollector.GetUsernameFromUID(uid)
 
 		// Salta utenti che non possono essere limitati
 		// Un utente può essere limitato se: è incluso (se include list configurata) E non è escluso
@@ -855,7 +944,7 @@ func (m *Manager) deactivateLimits() error {
 
 	// Per ogni utente, rimuovi i limiti
 	for _, uid := range usersToCleanup {
-		username := m.getUsername(uid)
+		username := m.metricsCollector.GetUsernameFromUID(uid)
 		userStr := fmt.Sprintf("%s(%d)", username, uid)
 		// Ripristina il limite normale
 		if err := m.cgroupManager.ApplyCPULimit(uid, m.cfg.CPUQuotaNormal); err != nil {
@@ -876,7 +965,7 @@ func (m *Manager) deactivateLimits() error {
 		if m.shouldApplyRAMLimits(uid) {
 			// Rimuovi prima memory.high
 			if err := m.cgroupManager.RemoveRAMHigh(uid); err != nil {
-				m.logger.Debug("Failed to remove RAM high limit for user",
+				m.logger.Warn("Failed to remove RAM high limit for user",
 					"user", userStr,
 					"error", err,
 				)
@@ -972,20 +1061,12 @@ func (m *Manager) updatePrometheusMetrics(metrics *SystemMetrics) {
 
 		isLimited := m.isUserLimited(uid)
 
-		// Ottieni info cgroup se disponibile
+		// Batch cgroup reads: single call instead of 3 separate ones
 		var cgroupPath, cpuQuota string
 		var memoryHighEvents uint64
 		var ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps uint64
 		if m.cgroupManager != nil {
-			if info, err := m.cgroupManager.GetCgroupInfo(uid); err == nil {
-				cgroupPath = info["path"]
-				cpuQuota = info["cpu.max"]
-			}
-			// Ottieni eventi memory.high (se il cgroup esiste)
-			memoryHighEvents, _ = m.cgroupManager.GetMemoryHighEvents(uid)
-
-			// Ottieni statistiche IO (se il cgroup esiste)
-			ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps, _ = m.cgroupManager.GetIOStats(uid)
+			cgroupPath, cpuQuota, memoryHighEvents, ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps, _ = m.cgroupManager.GetUserCgroupMetrics(uid)
 		}
 
 		// Usa UpdateUserMetrics con tutti i parametri

@@ -10,7 +10,7 @@
 # - Script generazione certificati TLS
 
 Name:    resman
-Version: 1.20.0
+Version: 1.20.1
 Release: 1%{?dist}
 Summary: Dynamic CPU, RAM and IO resource management tool using cgroups v2 with memory.high and io controller support
 
@@ -50,7 +50,8 @@ Requires(postun): systemd-units
 %description
 Enterprise-grade CPU, RAM and IO resource management tool with cgroups v2 support.
 Automatically limits CPU, memory and block I/O for non-system users based on configurable thresholds.
-NEW in v1.20.0: IO limits via cgroups v2 io controller.
+v1.20.0: IO limits via cgroups v2 io controller.
+v1.20.1: Architectural consistency across controllers, aligned Prometheus labels.
 
 **IMPORTANT: CGO is required for this package**
 
@@ -146,6 +147,9 @@ install -m 644 docs/alerting-rules.yml %{buildroot}/%{_docdir}/%{name}/ 2>/dev/n
 install -d %{buildroot}/%{_docdir}/%{name}/scripts
 install -m 755 docs/generate-tls-certs.sh %{buildroot}/%{_docdir}/%{name}/scripts/ 2>/dev/null || true
 
+# Installa CHANGELOG (solo se esiste nel tarball)
+install -m 644 CHANGELOG.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
+
 # Installazione file di configurazione syslog
 install -d %{buildroot}%{_sysconfdir}/rsyslog.d
 install -p -m 0644 packaging/syslog/resman.conf %{buildroot}%{_sysconfdir}/rsyslog.d/resman.conf
@@ -223,6 +227,7 @@ rmdir /var/run/resman 2>/dev/null || true
 %files
 %license LICENSE
 %doc README.md
+%doc CHANGELOG.md
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/resman.conf
 %{_unitdir}/resman.service
@@ -235,11 +240,22 @@ rmdir /var/run/resman 2>/dev/null || true
 %dir %{_docdir}/%{name}
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/LICENSE
+%doc %{_docdir}/%{name}/CHANGELOG.md
 %doc %{_docdir}/%{name}/resman.conf.example
 %doc %{_docdir}/%{name}/alerting-rules.yml
 %doc %{_docdir}/%{name}/scripts/
 
 %changelog
+* Tue Apr 01 2026 Francesco Defilippo <francesco@defilippo.org> - 1.20.1-1
+- FIX: IO filtering now uses IOUserIncludeList/IOUserExcludeList (was using CPU lists)
+- FIX: RAM and IO thresholds now participate in activate/deactivate decisions
+- FIX: Removed unused UserMetrics fields (MemoryHighEvents, IO*)
+- Refactor: Renamed isValidRAMQuota to isValidByteQuota
+- Refactor: Standardized error handling (all at Warn level)
+- Refactor: Removed is_limited label from per-user metrics (use resman_user_cpu_limited instead)
+- Docs: Added docs/ARCHITECTURE.md
+- Updated Grafana dashboard for new metric labels
+
 * Tue Apr 01 2026 Francesco Defilippo <francesco@defilippo.org> - 1.20.0-1
 - NEW: IO limits via cgroups v2 io controller
 - New configuration parameters: IO_LIMIT_ENABLED, IO_READ_BPS, IO_WRITE_BPS, IO_READ_IOPS, IO_WRITE_IOPS
@@ -459,6 +475,7 @@ rmdir /var/run/resman 2>/dev/null || true
 - 3 pre-built prompts: system-health, user-analysis, troubleshooting
 - HTTP and stdio transport support
 - Comprehensive MCP documentation (MCP-README.md, MCP-BLUEPRINT.md)
+- Updated README.md and CHANGELOG.md with MCP information
 
 * Sun Feb 22 2026 Francesco Defilippo <francesco@defilippo.org> - 1.1.0-1
 - Added TLS/HTTPS support for Prometheus metrics

@@ -15,7 +15,7 @@
 - **RAM limiting** with cgroups v2 memory controller
 - **IO limiting** with cgroups v2 io controller (bandwidth and IOPS)
 - **Per-user resource tracking**: CPU%, Memory (bytes), Process count, IO bytes/ops
-- **Threshold time window** to prevent false activations (CPU_THRESHOLD_DURATION)
+- **Threshold time window** to prevent false activations (CPU_THRESHOLD_DURATION, IO_THRESHOLD_DURATION)
 - **Blackout timeframes** support (CPU_MANAGER_BLACKOUT)
 
 ### User Filtering (v1.18.0+)
@@ -61,12 +61,13 @@ resman_limited_users_count_filtered         # Number of limitable users
 ```
 
 ### Per-User Metrics
-Detailed metrics for each user with `is_limited` label:
+Detailed metrics for each user (all use 2 labels: `uid`, `username`):
 
 ```prometheus
-resman_user_cpu_usage_percent{uid, username, hostname, server_role, is_limited}
-resman_user_memory_usage_bytes{uid, username, hostname, server_role, is_limited}
-resman_user_process_count{uid, username, hostname, server_role, is_limited}
+resman_user_cpu_usage_percent{uid, username, hostname, server_role}
+resman_user_memory_usage_bytes{uid, username, hostname, server_role}
+resman_user_process_count{uid, username, hostname, server_role}
+resman_user_cpu_limited{uid, username, hostname, server_role}    # 0 or 1
 resman_user_memory_high_breaches_total{uid, username, hostname, server_role}
 resman_user_io_read_bytes_total{uid, username, hostname, server_role}
 resman_user_io_write_bytes_total{uid, username, hostname, server_role}
@@ -83,10 +84,10 @@ USER_EXCLUDE_LIST=admin       # But never limit 'admin' user
 PROCESS_EXCLUDE_LIST=^systemd$,^dbus-.*  # Never limit these processes
 
 # Result:
-# - testuser1 (UID 1001) → Monitored + Limited (is_limited="true")
-# - testuser2 (UID 1002) → Monitored + Limited (is_limited="true")
-# - admin (UID 1003)      → Monitored + NOT Limited (is_limited="false")
-# - normaluser (UID 1004) → Monitored + NOT Limited (is_limited="false")
+# - testuser1 (UID 1001) → Monitored + Limited (resman_user_cpu_limited=1)
+# - testuser2 (UID 1002) → Monitored + Limited (resman_user_cpu_limited=1)
+# - admin (UID 1003)      → Monitored + NOT Limited (resman_user_cpu_limited=0)
+# - normaluser (UID 1004) → Monitored + NOT Limited (resman_user_cpu_limited=0)
 ```
 
 ## 🤖 MCP Server (AI Integration)
@@ -97,11 +98,11 @@ ResMan includes a built-in **Model Context Protocol (MCP)** server for AI assist
 
 **Read-only (13 tools):**
 - `get_system_status` - Overall system health
-- `get_user_metrics` - Per-user CPU/RAM/process metrics
+- `get_user_metrics` - Per-user CPU/RAM/IO metrics (includes memory.max, memory.high, io.max)
 - `get_active_users` - List of currently active users
-- `get_limits_status` - Current limits state
-- `get_cgroup_info` - Cgroup details
-- `get_configuration` - Current configuration
+- `get_limits_status` - Current CPU/RAM/IO limits state
+- `get_cgroup_info` - Cgroup details (CPU, RAM, IO limits per user)
+- `get_configuration` - Current configuration (CPU, RAM, IO settings)
 - `get_control_history` - Historical control decisions
 - `get_cpu_report` - CPU usage report
 - `get_mem_report` - Memory usage report
@@ -117,12 +118,13 @@ ResMan includes a built-in **Model Context Protocol (MCP)** server for AI assist
 - `deactivate_limits` - Manually deactivate CPU limits
 
 ### MCP Resources (6 endpoints)
-- `resman://system/status` - System overview
+- `resman://system/status` - System overview (CPU, memory, limits state)
 - `resman://system/metrics` - Detailed metrics
 - `resman://users/active` - Active users list
-- `resman://users/{uid}/metrics` - Per-user metrics
+- `resman://users/{uid}/metrics` - Per-user metrics (CPU, RAM, IO cgroup stats)
 - `resman://limits/status` - Limits state
-- `resman://configuration` - Current config
+- `resman://configuration` - Current config (CPU, RAM, IO settings)
+- `resman://cgroups/{uid}` - Cgroup information for a specific user
 
 ### MCP Prompts (3 templates)
 - `system_health_check` - Quick health assessment
@@ -153,10 +155,10 @@ sudo systemctl enable --now resman
 #### From RPM
 ```bash
 # Download latest RPM
-wget https://github.com/fdefilippo/resman/releases/latest/download/resman-1.18.0-1.x86_64.rpm
+wget https://github.com/fdefilippo/resman/releases/latest/download/resman-1.20.1-1.x86_64.rpm
 
 # Install
-sudo rpm -ivh resman-1.18.0-1.x86_64.rpm
+sudo rpm -ivh resman-1.20.1-1.x86_64.rpm
 sudo systemctl enable --now resman
 ```
 
@@ -186,10 +188,14 @@ RAM_QUOTA_PER_USER=512M
 
 # IO limits (optional)
 IO_LIMIT_ENABLED=false
+IO_THRESHOLD=75
+IO_RELEASE_THRESHOLD=40
 IO_READ_BPS=100M
 IO_WRITE_BPS=50M
 IO_READ_IOPS=1000
 IO_WRITE_IOPS=500
+IO_DEVICE_FILTER=all
+IO_THRESHOLD_DURATION=0
 
 # Monitoring
 SYSTEM_UID_MIN=1000           # Monitor users with UID >= 1000
@@ -251,10 +257,10 @@ resman_limited_users_count_filtered{hostname, server_role}         # Limited use
 
 ### Per-User Metrics
 ```prometheus
-resman_user_cpu_usage_percent{uid, username, hostname, server_role, is_limited}
-resman_user_memory_usage_bytes{uid, username, hostname, server_role, is_limited}
-resman_user_process_count{uid, username, hostname, server_role, is_limited}
-resman_user_cpu_limited{uid, username, hostname, server_role, is_limited}
+resman_user_cpu_usage_percent{uid, username, hostname, server_role}
+resman_user_memory_usage_bytes{uid, username, hostname, server_role}
+resman_user_process_count{uid, username, hostname, server_role}
+resman_user_cpu_limited{uid, username, hostname, server_role}
 resman_user_memory_high_breaches_total{uid, username, hostname, server_role}
 resman_user_io_read_bytes_total{uid, username, hostname, server_role}
 resman_user_io_write_bytes_total{uid, username, hostname, server_role}
@@ -314,6 +320,7 @@ resman_errors_total{component, error_type, hostname, server_role}  # Errors
 | `IO_LIMIT_ENABLED` | `false` | Enable IO limiting |
 | `IO_THRESHOLD` | `75` | Activate IO limits when ≥ X% |
 | `IO_RELEASE_THRESHOLD` | `40` | Release IO limits when < X% |
+| `IO_THRESHOLD_DURATION` | `0` | Wait time before activating IO limits (seconds, 0 = immediate) |
 | `IO_READ_BPS` | `100M` | Per-user read bandwidth limit |
 | `IO_WRITE_BPS` | `50M` | Per-user write bandwidth limit |
 | `IO_READ_IOPS` | `1000` | Per-user read IOPS limit (0=unlimited) |
@@ -321,12 +328,18 @@ resman_errors_total{component, error_type, hostname, server_role}  # Errors
 | `IO_DEVICE_FILTER` | `all` | Device filter ("all" or "major:minor") |
 
 ### User Filtering
+Each controller has independent user filter lists:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SYSTEM_UID_MIN` | `1000` | Minimum UID to monitor |
 | `SYSTEM_UID_MAX` | Auto | Maximum UID (from /proc/sys/kernel/pid_max) |
-| `USER_INCLUDE_LIST` | Empty | Regex patterns for users to limit |
-| `USER_EXCLUDE_LIST` | Empty | Regex patterns for users to exclude |
+| `USER_INCLUDE_LIST` | Empty | Regex patterns for CPU users to limit |
+| `USER_EXCLUDE_LIST` | Empty | Regex patterns for CPU users to exclude |
+| `RAM_USER_INCLUDE_LIST` | Empty | Regex patterns for RAM users to limit |
+| `RAM_USER_EXCLUDE_LIST` | Empty | Regex patterns for RAM users to exclude |
+| `IO_USER_INCLUDE_LIST` | Empty | Regex patterns for IO users to limit |
+| `IO_USER_EXCLUDE_LIST` | Empty | Regex patterns for IO users to exclude |
 | `PROCESS_EXCLUDE_LIST` | `^systemd$,^dbus-daemon$,^dbus-broker$,^polkitd$` | Processes to never limit |
 
 ### Blackout Timeframes
@@ -359,6 +372,7 @@ CPU_MANAGER_BLACKOUT=1-5 08-18;0,6 00-23
 - **Grafana dashboard**: `docs/dashboard-grafana.json`
 - **Multi-cluster guide**: `docs/GRAFANA-MULTI-CLUSTER-GUIDE.md`
 - **IO limits guide**: `docs/IO-LIMITS.md`
+- **Architecture**: `docs/ARCHITECTURE.md`
 - **MCP documentation**: `docs/MCP-README.md`
 - **TLS configuration**: `docs/TLS-CONFIGURATION.md`
 - **Prometheus queries**: `docs/prometheus-queries.md`
@@ -385,9 +399,9 @@ ResMan uses Linux cgroups v2 with the following controllers:
    └─ BLACKOUT timeframes
 
 3. Make decision
-   ├─ CPU_THRESHOLD_DURATION check
-   ├─ Activate if CPU >= CPU_THRESHOLD
-   ├─ Release if CPU < CPU_RELEASE_THRESHOLD
+   ├─ Activate if ANY resource exceeds threshold (CPU OR RAM OR IO)
+   ├─ CPU_THRESHOLD_DURATION / IO_THRESHOLD_DURATION checks
+   ├─ Deactivate if ALL resources below release thresholds
    └─ Respect MIN_ACTIVE_TIME
 
 4. Apply limits

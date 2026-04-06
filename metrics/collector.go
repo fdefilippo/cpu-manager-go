@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fdefilippo/resman/config"
@@ -41,6 +42,7 @@ const (
 	jiffiesPerSecond       = 100.0
 	cpuUsageEstimateFactor = 0.1
 	pageSizeBytes          = 4096
+	procCacheShardCount    = 64 // Number of shards for process CPU cache
 )
 
 // UserMetrics contains metrics for a single user.
@@ -51,6 +53,63 @@ type UserMetrics struct {
 	MemoryUsage  uint64  // Memory in bytes (VmRSS)
 	ProcessCount int     // Number of processes
 	IsLimited    bool    // Whether user has CPU limits applied
+}
+
+// procCacheShard holds CPU timing data for a subset of PIDs.
+type procCacheShard struct {
+	mu           sync.RWMutex
+	prevProcCPU  map[int32]cpu.TimesStat
+	prevProcTime map[int32]time.Time
+}
+
+// getShard returns the shard index for a given PID.
+func getShard(pid int32) int {
+	return int(pid) % procCacheShardCount
+}
+
+// findAndRemoveOldestPID finds and removes the oldest entry across all shards.
+// Must be called when a new entry needs to be added but cache is full.
+// Returns true if an entry was removed.
+func (c *Collector) findAndRemoveOldestPID() bool {
+	// Lock all shards in consistent order
+	for i := 0; i < procCacheShardCount; i++ {
+		c.procCacheShards[i].mu.Lock()
+	}
+	defer func() {
+		for i := 0; i < procCacheShardCount; i++ {
+			c.procCacheShards[i].mu.Unlock()
+		}
+	}()
+
+	var oldestPID int32
+	var oldestTime time.Time
+	first := true
+
+	// Find oldest entry across all shards
+	for i := 0; i < procCacheShardCount; i++ {
+		shard := c.procCacheShards[i]
+		for pid, ts := range shard.prevProcTime {
+			if first || ts.Before(oldestTime) {
+				oldestTime = ts
+				oldestPID = pid
+				first = false
+			}
+		}
+	}
+
+	if first {
+		// No entries found
+		return false
+	}
+
+	// Remove the oldest entry
+	shardIdx := getShard(oldestPID)
+	shard := c.procCacheShards[shardIdx]
+	// We already hold this shard's lock (since we locked all shards)
+	delete(shard.prevProcCPU, oldestPID)
+	delete(shard.prevProcTime, oldestPID)
+	atomic.AddInt32(&c.procCacheSize, -1)
+	return true
 }
 
 // userData is a temporary structure for accumulating data per UID during /proc scan.
@@ -76,9 +135,8 @@ type Collector struct {
 	prevCPUTime  time.Time
 
 	// Cache per CPU usage per processo (necessaria per calcolo delta)
-	prevProcCPU  map[int32]cpu.TimesStat
-	prevProcTime map[int32]time.Time
-	procCPUMutex sync.RWMutex
+	procCacheShards [procCacheShardCount]*procCacheShard
+	procCacheSize   int32 // Total entries across all shards (atomic)
 
 	// Database writer (opzionale)
 	dbWriter *DBWriter
@@ -112,13 +170,19 @@ func NewCollector(cfg *config.Config) (*Collector, error) {
 		cache:             make(map[string]interface{}),
 		cacheTimestamps:   make(map[string]time.Time),
 		prevCPUTime:       time.Now(),
-		prevProcCPU:       make(map[int32]cpu.TimesStat),
-		prevProcTime:      make(map[int32]time.Time),
 		usernameCache:     make(map[int]string),
 		usernameCacheTime: make(map[int]time.Time),
 		usernameCacheTTL:  DEFAULT_USERNAME_CACHE_TTL,
 		stopCleanup:       make(chan struct{}),
 		cleanupDone:       make(chan struct{}),
+	}
+
+	// Inizializza shard per cache CPU processi
+	for i := 0; i < procCacheShardCount; i++ {
+		collector.procCacheShards[i] = &procCacheShard{
+			prevProcCPU:  make(map[int32]cpu.TimesStat),
+			prevProcTime: make(map[int32]time.Time),
+		}
 	}
 
 	go collector.periodicCleanup()
@@ -325,41 +389,12 @@ func (c *Collector) GetUserCPUUsage(uid int) float64 {
 		return val.(float64)
 	}
 
+	// Use data already collected by GetAllUserMetrics to avoid redundant scans
+	allMetrics := c.GetAllUserMetrics()
 	var totalUsage float64
-	var processCount int
-
-	// Metodo: Usa gopsutil/process.CPUPercent() che gestisce internamente il delta
-	processes, err := process.Processes()
-	if err == nil {
-		for _, p := range processes {
-			// Ottieni l'UID del processo
-			if uids, err := p.Uids(); err == nil && len(uids) > 0 {
-				if int(uids[0]) == uid { // UID reale
-					// Escludi processi di sistema
-					pname, _ := p.Name()
-
-					processCount++
-					// CPUPercent() fa due letture internamente
-					// La prima volta restituisce 0, ma le successive funzionano
-					if cpuPercent, err := p.CPUPercent(); err == nil {
-						c.logger.Debug("Process CPU usage",
-							"pid", p.Pid,
-							"uid", uid,
-							"name", pname,
-							"cpu_percent", cpuPercent,
-						)
-						totalUsage += cpuPercent
-					}
-				}
-			}
-		}
+	if metrics, exists := allMetrics[uid]; exists {
+		totalUsage = metrics.CPUUsage
 	}
-
-	c.logger.Debug("User CPU usage calculated",
-		"user", fmt.Sprintf("%s(%d)", c.getUsername(uid), uid),
-		"process_count", processCount,
-		"total_usage", totalUsage,
-	)
 
 	c.setInCache(cacheKey, totalUsage)
 	return totalUsage
@@ -502,10 +537,10 @@ func (c *Collector) GetAllUsersCPUUsage() float64 {
 
 	var totalUsage float64
 
-	// Ottieni TUTTI gli utenti (senza filtri)
-	allUsers := c.GetAllUsers()
-	for _, uid := range allUsers {
-		totalUsage += c.GetUserCPUUsage(uid)
+	// Utilizza i dati già raccolti da GetAllUserMetrics per evitare scansioni ridondanti
+	allMetrics := c.GetAllUserMetrics()
+	for _, metrics := range allMetrics {
+		totalUsage += metrics.CPUUsage
 	}
 
 	c.setInCache(cacheKey, totalUsage)
@@ -522,10 +557,12 @@ func (c *Collector) GetLimitedUsersCPUUsage() float64 {
 
 	var totalUsage float64
 
-	// Ottieni solo utenti che passano i filtri
-	limitedUsers := c.GetLimitedUsers()
-	for _, uid := range limitedUsers {
-		totalUsage += c.GetUserCPUUsage(uid)
+	// Utilizza i dati già raccolti da GetAllUserMetrics e filtra per utenti limitabili
+	allMetrics := c.GetAllUserMetrics()
+	for _, metrics := range allMetrics {
+		if metrics.IsLimited {
+			totalUsage += metrics.CPUUsage
+		}
 	}
 
 	c.setInCache(cacheKey, totalUsage)
@@ -541,27 +578,10 @@ func (c *Collector) GetAllUsers() []int {
 		return val.([]int)
 	}
 
-	uidMap := make(map[int]bool)
-
-	// Metodo 1: Usa gopsutil
-	processes, err := process.Processes()
-	if err == nil {
-		for _, p := range processes {
-			if uids, err := p.Uids(); err == nil && len(uids) > 0 {
-				uid := int(uids[0])
-				if c.isValidUserUID(uid) {
-					uidMap[uid] = true
-				}
-			}
-		}
-	} else {
-		// Fallback: legge da /proc
-		uidMap = c.getActiveUsersFromProc()
-	}
-
-	// Converti la mappa in slice
-	users := make([]int, 0, len(uidMap))
-	for uid := range uidMap {
+	// Utilizza i dati già raccolti da GetAllUserMetrics per evitare scansioni ridondanti
+	allMetrics := c.GetAllUserMetrics()
+	users := make([]int, 0, len(allMetrics))
+	for uid := range allMetrics {
 		users = append(users, uid)
 	}
 
@@ -578,79 +598,17 @@ func (c *Collector) GetLimitedUsers() []int {
 		return val.([]int)
 	}
 
-	uidMap := make(map[int]bool)
-
-	// Metodo 1: Usa gopsutil
-	processes, err := process.Processes()
-	if err == nil {
-		for _, p := range processes {
-			if uids, err := p.Uids(); err == nil && len(uids) > 0 {
-				uid := int(uids[0])
-				if c.isValidUserUID(uid) {
-					// Check se l'utente è incluso nella include list
-					username := c.getUsername(uid)
-					if c.cfg.IsUserIncluded(username) {
-						// Check se l'utente è escluso dalla exclude list
-						if !c.cfg.IsUserExcluded(username) {
-							uidMap[uid] = true
-						}
-					}
-				}
-			}
+	// Utilizza i dati già raccolti da GetAllUserMetrics e filtra per utenti limitabili
+	allMetrics := c.GetAllUserMetrics()
+	users := make([]int, 0, len(allMetrics))
+	for uid, metrics := range allMetrics {
+		if metrics.IsLimited {
+			users = append(users, uid)
 		}
-	} else {
-		// Fallback: legge da /proc
-		uidMap = c.getActiveUsersFromProc()
-	}
-
-	// Converti la mappa in slice
-	users := make([]int, 0, len(uidMap))
-	for uid := range uidMap {
-		users = append(users, uid)
 	}
 
 	c.setInCache(cacheKey, users)
 	return users
-}
-
-// previousUsers memorizza la lista precedente di utenti per il confronto
-var (
-	previousUsers      []int
-	previousUsersMutex sync.RWMutex
-)
-
-// areUsersEqual verifica se la lista degli utenti è cambiata rispetto al ciclo precedente
-func (c *Collector) areUsersEqual(current []int) bool {
-	previousUsersMutex.RLock()
-	defer previousUsersMutex.RUnlock()
-
-	if len(previousUsers) != len(current) {
-		return false
-	}
-
-	// Crea mappe per confronto veloce
-	currentMap := make(map[int]bool)
-	for _, uid := range current {
-		currentMap[uid] = true
-	}
-
-	for _, uid := range previousUsers {
-		if !currentMap[uid] {
-			return false
-		}
-	}
-
-	return true
-}
-
-// setPreviousUsers memorizza la lista corrente per il prossimo confronto
-func (c *Collector) setPreviousUsers(users []int) {
-	previousUsersMutex.Lock()
-	defer previousUsersMutex.Unlock()
-
-	// Crea una copia per evitare race condition
-	previousUsers = make([]int, len(users))
-	copy(previousUsers, users)
 }
 
 // formatActiveUsers formatta una lista di UID come lista di "username(uid)"
@@ -792,8 +750,8 @@ func (c *Collector) getUsernameFromPasswd(uid int) (string, error) {
 	return "", fmt.Errorf("UID %d not found in /etc/passwd", uid)
 }
 
-// getUsernameFromUID è un alias per coerenza con il resto del codice
-func (c *Collector) getUsernameFromUID(uid int) string {
+// GetUsernameFromUID ritorna la username dato un UID (public alias)
+func (c *Collector) GetUsernameFromUID(uid int) string {
 	return c.getUsername(uid)
 }
 
@@ -1124,14 +1082,18 @@ func (c *Collector) cleanupCache() {
 	}
 
 	// Pulisci anche la cache dei processi CPU (processi vecchi > 5 minuti)
-	c.procCPUMutex.Lock()
-	for pid, timestamp := range c.prevProcTime {
-		if now.Sub(timestamp) > 5*time.Minute {
-			delete(c.prevProcCPU, pid)
-			delete(c.prevProcTime, pid)
+	for i := 0; i < procCacheShardCount; i++ {
+		shard := c.procCacheShards[i]
+		shard.mu.Lock()
+		for pid, timestamp := range shard.prevProcTime {
+			if now.Sub(timestamp) > 5*time.Minute {
+				delete(shard.prevProcCPU, pid)
+				delete(shard.prevProcTime, pid)
+				atomic.AddInt32(&c.procCacheSize, -1)
+			}
 		}
+		shard.mu.Unlock()
 	}
-	c.procCPUMutex.Unlock()
 
 	// Pulisci anche la cache username (utenti non risolti da > TTL)
 	c.usernameCacheMutex.Lock()
@@ -1226,7 +1188,7 @@ func (c *Collector) GetSystemLoad() (float64, error) {
 }
 
 // GetAllUserMetrics returns metrics (CPU, memory, processes) for all active users.
-// Optimization: single /proc scan with pre-allocation and combined UID+name reading.
+// Uses gopsutil for efficient process discovery with single-pass aggregation.
 func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
 	cacheKey := "all_user_metrics"
 	if val, valid := c.getFromCache(cacheKey, time.Duration(c.cfg.MetricsCacheTTL)*time.Second); valid {
@@ -1236,35 +1198,28 @@ func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
 	}
 
 	userMetrics := make(map[int]*UserMetrics)
-	procDir := "/proc"
 
-	entries, err := os.ReadDir(procDir)
+	// Use gopsutil for efficient process discovery
+	procs, err := process.Processes()
 	if err != nil {
-		c.logger.Warn("Failed to read /proc directory for user metrics",
+		c.logger.Warn("Failed to get processes via gopsutil, falling back to /proc scan",
 			"error", err,
-			"fallback", "returning empty metrics",
 		)
-		return userMetrics
+		return c.getAllUserMetricsFallback()
 	}
 
-	// Pre-allocate with estimated capacity (reduces dynamic allocations)
-	estimatedUIDs := len(entries) / 50 // Estimate: ~50 processes per average UID
-	tempData := make(map[int]*userData, estimatedUIDs)
+	// Pre-allocate with estimated capacity
+	tempData := make(map[int]*userData, len(procs)/50)
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, p := range procs {
+		// Get process UID
+		uids, err := p.Uids()
+		if err != nil || len(uids) == 0 {
 			continue
 		}
+		uid := int(uids[0])
 
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-
-		// Read process UID
-		statusFile := filepath.Join(procDir, entry.Name(), "status")
-		uid, err := c.getUIDFromStatusFile(statusFile)
-		if err != nil || !c.isValidUserUID(uid) {
+		if !c.isValidUserUID(uid) {
 			continue
 		}
 
@@ -1273,21 +1228,23 @@ func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
 			tempData[uid] = &userData{}
 		}
 
-		// Count process (all processes, including those excluded from limits)
+		// Count process
 		tempData[uid].processCount++
 
-		// Read CPU usage (all processes, including those excluded from limits)
-		cpuUsage := c.getProcessCPUUsageSimple(pid)
+		// Read CPU usage using gopsutil proc.Times()
+		cpuUsage := c.getProcessCPUUsageSimpleWithHandle(p)
 		tempData[uid].cpuUsage += cpuUsage
 
-		// Read memory usage (VmRSS in bytes) (all processes)
-		memoryUsage := c.getProcessMemoryUsage(pid)
-		tempData[uid].memoryUsage += memoryUsage
+		// Read memory usage (RSS)
+		memInfo, err := p.MemoryInfo()
+		if err == nil && memInfo != nil {
+			tempData[uid].memoryUsage += memInfo.RSS
+		}
 	}
 
 	// Convert to UserMetrics with username
 	for uid, data := range tempData {
-		username := c.getUsernameFromUID(uid)
+		username := c.GetUsernameFromUID(uid)
 		userMetrics[uid] = &UserMetrics{
 			UID:          uid,
 			Username:     username,
@@ -1302,7 +1259,67 @@ func (c *Collector) GetAllUserMetrics() map[int]*UserMetrics {
 	return userMetrics
 }
 
+// getAllUserMetricsFallback scans /proc manually if gopsutil fails.
+func (c *Collector) getAllUserMetricsFallback() map[int]*UserMetrics {
+	userMetrics := make(map[int]*UserMetrics)
+	procDir := "/proc"
+
+	entries, err := os.ReadDir(procDir)
+	if err != nil {
+		c.logger.Warn("Failed to read /proc directory for user metrics",
+			"error", err,
+			"fallback", "returning empty metrics",
+		)
+		return userMetrics
+	}
+
+	estimatedUIDs := len(entries) / 50
+	tempData := make(map[int]*userData, estimatedUIDs)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		statusFile := filepath.Join(procDir, entry.Name(), "status")
+		uid, err := c.getUIDFromStatusFile(statusFile)
+		if err != nil || !c.isValidUserUID(uid) {
+			continue
+		}
+
+		if tempData[uid] == nil {
+			tempData[uid] = &userData{}
+		}
+
+		tempData[uid].processCount++
+		cpuUsage := c.getProcessCPUUsageSimple(pid)
+		tempData[uid].cpuUsage += cpuUsage
+		memoryUsage := c.getProcessMemoryUsage(pid)
+		tempData[uid].memoryUsage += memoryUsage
+	}
+
+	for uid, data := range tempData {
+		username := c.GetUsernameFromUID(uid)
+		userMetrics[uid] = &UserMetrics{
+			UID:          uid,
+			Username:     username,
+			CPUUsage:     data.cpuUsage,
+			MemoryUsage:  data.memoryUsage,
+			ProcessCount: data.processCount,
+			IsLimited:    c.cfg.IsUserWhitelisted(username),
+		}
+	}
+
+	return userMetrics
+}
+
 // GetUserMemoryUsage returns total memory used by a user in bytes.
+// Uses gopsutil for efficient process discovery and memory reading.
 func (c *Collector) GetUserMemoryUsage(uid int) uint64 {
 	if !c.isValidUserUID(uid) {
 		return 0
@@ -1313,16 +1330,24 @@ func (c *Collector) GetUserMemoryUsage(uid int) uint64 {
 		return val.(uint64)
 	}
 
+	// Use data already collected by GetAllUserMetrics to avoid redundant scans
+	allMetrics := c.GetAllUserMetrics()
+	var totalMemory uint64
+	if metrics, exists := allMetrics[uid]; exists {
+		totalMemory = metrics.MemoryUsage
+	}
+
+	c.setInCache(cacheKey, totalMemory)
+	return totalMemory
+}
+
+// getUserMemoryUsageFallback scans /proc manually if gopsutil fails.
+func (c *Collector) getUserMemoryUsageFallback(uid int) uint64 {
 	var totalMemory uint64
 
 	procDir := "/proc"
 	entries, err := os.ReadDir(procDir)
 	if err != nil {
-		c.logger.Warn("Failed to read /proc directory for user memory stats",
-			"uid", uid,
-			"error", err,
-			"fallback", "returning 0 bytes",
-		)
 		return 0
 	}
 
@@ -1346,7 +1371,6 @@ func (c *Collector) GetUserMemoryUsage(uid int) uint64 {
 		totalMemory += memoryUsage
 	}
 
-	c.setInCache(cacheKey, totalMemory)
 	return totalMemory
 }
 
@@ -1360,9 +1384,10 @@ func (c *Collector) GetAllUsersMemoryUsage() uint64 {
 
 	var totalMemory uint64
 
-	allUsers := c.GetAllUsers()
-	for _, uid := range allUsers {
-		totalMemory += c.GetUserMemoryUsage(uid)
+	// Utilizza i dati già raccolti da GetAllUserMetrics per evitare scansioni ridondanti
+	allMetrics := c.GetAllUserMetrics()
+	for _, metrics := range allMetrics {
+		totalMemory += metrics.MemoryUsage
 	}
 
 	c.setInCache(cacheKey, totalMemory)
@@ -1379,9 +1404,12 @@ func (c *Collector) GetLimitedUsersMemoryUsage() uint64 {
 
 	var totalMemory uint64
 
-	limitedUsers := c.GetLimitedUsers()
-	for _, uid := range limitedUsers {
-		totalMemory += c.GetUserMemoryUsage(uid)
+	// Utilizza i dati già raccolti da GetAllUserMetrics e filtra per utenti limitabili
+	allMetrics := c.GetAllUserMetrics()
+	for _, metrics := range allMetrics {
+		if metrics.IsLimited {
+			totalMemory += metrics.MemoryUsage
+		}
 	}
 
 	c.setInCache(cacheKey, totalMemory)
@@ -1421,6 +1449,15 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
 	if err != nil {
 		return 0
 	}
+	return c.getProcessCPUUsageSimpleWithHandle(proc)
+}
+
+// getProcessCPUUsageSimpleWithHandle calcola l'uso CPU usando un handle gopsutil esistente.
+// Più efficiente quando l'handle è già disponibile (evita chiamata a process.NewProcess).
+func (c *Collector) getProcessCPUUsageSimpleWithHandle(proc *process.Process) float64 {
+	pid32 := proc.Pid
+	shardIdx := getShard(pid32)
+	shard := c.procCacheShards[shardIdx]
 
 	// Ottieni tempi CPU attuali
 	times, err := proc.Times()
@@ -1429,14 +1466,13 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
 	}
 
 	now := time.Now()
-	pid32 := int32(pid)
 
-	c.procCPUMutex.Lock()
-	defer c.procCPUMutex.Unlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	// Controlla se abbiamo un campione precedente
-	if prevTimes, ok := c.prevProcCPU[pid32]; ok {
-		if prevTime, ok := c.prevProcTime[pid32]; ok {
+	if prevTimes, ok := shard.prevProcCPU[pid32]; ok {
+		if prevTime, ok := shard.prevProcTime[pid32]; ok {
 			// Calcola tempo trascorso in secondi
 			elapsed := now.Sub(prevTime).Seconds()
 			if elapsed > 0 {
@@ -1446,8 +1482,8 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
 				cpuPercent := (delta / elapsed) * cpuPercentMultiplier
 
 				// Aggiorna campione corrente
-				c.prevProcCPU[pid32] = *times
-				c.prevProcTime[pid32] = now
+				shard.prevProcCPU[pid32] = *times
+				shard.prevProcTime[pid32] = now
 
 				return cpuPercent
 			}
@@ -1456,29 +1492,27 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
 
 	// Primo campione: salva e ritorna 0
 	// Se cache è piena, rimuovi entry più vecchia (LRU)
-	if len(c.prevProcCPU) >= MAX_PROC_CACHE_SIZE {
-		oldestPID := int32(0)
-		oldestTime := time.Now()
-
-		for pid, ts := range c.prevProcTime {
-			if ts.Before(oldestTime) {
-				oldestTime = ts
-				oldestPID = pid
-			}
-		}
-
-		if oldestPID != 0 {
-			delete(c.prevProcCPU, oldestPID)
-			delete(c.prevProcTime, oldestPID)
+	if atomic.LoadInt32(&c.procCacheSize) >= MAX_PROC_CACHE_SIZE {
+		// Cache full, need to remove oldest entry
+		// Release shard lock to avoid deadlock with findAndRemoveOldestPID
+		shard.mu.Unlock()
+		removed := c.findAndRemoveOldestPID()
+		shard.mu.Lock()
+		if !removed {
+			// Should not happen, but if no entry was removed, we can't add new one
+			return 0
 		}
 	}
 
-	c.prevProcCPU[pid32] = *times
-	c.prevProcTime[pid32] = now
+	// Aggiungi nuova entry
+	shard.prevProcCPU[pid32] = *times
+	shard.prevProcTime[pid32] = now
+	atomic.AddInt32(&c.procCacheSize, 1)
 	return 0
 }
 
-// GetUserProcessCount restituisce il numero di processi di un utente.
+// GetUserProcessCount returns the number of processes for a user.
+// Uses gopsutil for efficient process discovery.
 func (c *Collector) GetUserProcessCount(uid int) int {
 	if !c.isValidUserUID(uid) {
 		return 0
@@ -1489,6 +1523,19 @@ func (c *Collector) GetUserProcessCount(uid int) int {
 		return val.(int)
 	}
 
+	// Use data already collected by GetAllUserMetrics to avoid redundant scans
+	allMetrics := c.GetAllUserMetrics()
+	count := 0
+	if metrics, exists := allMetrics[uid]; exists {
+		count = metrics.ProcessCount
+	}
+
+	c.setInCache(cacheKey, count)
+	return count
+}
+
+// getUserProcessCountFallback scans /proc manually if gopsutil fails.
+func (c *Collector) getUserProcessCountFallback(uid int) int {
 	count := 0
 	procDir := "/proc"
 
@@ -1514,7 +1561,6 @@ func (c *Collector) GetUserProcessCount(uid int) int {
 		}
 	}
 
-	c.setInCache(cacheKey, count)
 	return count
 }
 

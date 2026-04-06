@@ -94,10 +94,9 @@ type PrometheusExporter struct {
 	cgroupMemoryUsage    *prometheus.GaugeVec
 
 	// Track utenti attivi per cleanup metriche
-	activeUserMetrics    map[string]bool   // "uid_username_is_limited" -> true
+	activeUserMetrics    map[string]bool   // "uid_username" -> true
 	prevMemoryHighEvents map[string]uint64 // "uid_username" -> last known value
 	prevIOStats          map[string]ioStatsSnapshot
-	metricsMu            sync.RWMutex
 
 	// Metriche counter (solo incremento)
 	limitsActivatedTotal   prometheus.Counter
@@ -395,7 +394,7 @@ func (exp *PrometheusExporter) registerMetrics() error {
 			Help:        "CPU usage percentage per user",
 			ConstLabels: staticLabels,
 		},
-		[]string{"uid", "username", "is_limited"},
+		[]string{"uid", "username"},
 	)
 
 	// NUOVA METRICA: Memoria per utente
@@ -406,7 +405,7 @@ func (exp *PrometheusExporter) registerMetrics() error {
 			Help:        "Memory usage in bytes per user",
 			ConstLabels: staticLabels,
 		},
-		[]string{"uid", "username", "is_limited"},
+		[]string{"uid", "username"},
 	)
 
 	// NUOVA METRICA: Numero processi per utente
@@ -417,7 +416,7 @@ func (exp *PrometheusExporter) registerMetrics() error {
 			Help:        "Number of processes per user",
 			ConstLabels: staticLabels,
 		},
-		[]string{"uid", "username", "is_limited"},
+		[]string{"uid", "username"},
 	)
 
 	exp.userLimited = promauto.With(exp.registry).NewGaugeVec(
@@ -427,7 +426,7 @@ func (exp *PrometheusExporter) registerMetrics() error {
 			Help:        "Whether CPU limit is applied for user (1) or not (0)",
 			ConstLabels: staticLabels,
 		},
-		[]string{"uid", "username", "is_limited"},
+		[]string{"uid", "username"},
 	)
 
 	exp.userMemoryHighEvents = promauto.With(exp.registry).NewCounterVec(
@@ -638,8 +637,7 @@ func (exp *PrometheusExporter) UpdateMetrics(metrics map[string]float64) {
 			if len(parts) >= 3 {
 				uid := parts[2]
 				username := exp.getUsernameFromUID(uid)
-				isLimited := value == 1.0
-				exp.userLimited.WithLabelValues(uid, username, strconv.FormatBool(isLimited)).Set(value)
+				exp.userLimited.WithLabelValues(uid, username).Set(value)
 			}
 		case strings.HasPrefix(key, "cgroup_cpu_quota_"):
 			// Formato: cgroup_cpu_quota_1000:/sys/fs/cgroup/...
@@ -660,42 +658,48 @@ func (exp *PrometheusExporter) UpdateMetrics(metrics map[string]float64) {
 
 // UpdateUserMetrics aggiorna le metriche specifiche per utente.
 func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUsage float64, memoryUsage uint64, processCount int, isLimited bool, cgroupPath, cpuQuota string, memoryHighEvents uint64, ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps uint64) {
-	if exp == nil {
+	if exp == nil || exp.registry == nil {
 		return
+	}
+
+	uidStr := strconv.Itoa(uid)
+
+	// Se username è vuoto, cerca di ottenerlo (before lock to minimize hold time)
+	if username == "" || username == uidStr {
+		username = exp.getUsernameFromUID(uidStr)
+	}
+
+	// Read cgroup memory before acquiring lock (fix #4: avoid file I/O under lock)
+	cgroupMemory := uint64(0)
+	if cgroupPath != "" {
+		cgroupMemory = uint64(exp.getCgroupMemoryUsage(cgroupPath))
 	}
 
 	exp.mu.Lock()
 	defer exp.mu.Unlock()
 
-	uidStr := strconv.Itoa(uid)
-
-	// Se username è vuoto, cerca di ottenerlo
-	if username == "" || username == uidStr {
-		username = exp.getUsernameFromUID(uidStr)
-	}
-
 	// Marca utente come attivo
-	userKey := fmt.Sprintf("%s_%s_%v", uidStr, username, isLimited)
+	userKey := fmt.Sprintf("%s_%s", uidStr, username)
 	exp.activeUserMetrics[userKey] = true
 
 	// Aggiorna uso CPU dell'utente
-	exp.userCPUUsage.WithLabelValues(uidStr, username, strconv.FormatBool(isLimited)).Set(cpuUsage)
+	exp.userCPUUsage.WithLabelValues(uidStr, username).Set(cpuUsage)
 
 	// Aggiorna uso memoria dell'utente (in bytes)
-	exp.userMemoryUsage.WithLabelValues(uidStr, username, strconv.FormatBool(isLimited)).Set(float64(memoryUsage))
+	exp.userMemoryUsage.WithLabelValues(uidStr, username).Set(float64(memoryUsage))
 
 	// Aggiorna numero processi dell'utente
-	exp.userProcessCount.WithLabelValues(uidStr, username, strconv.FormatBool(isLimited)).Set(float64(processCount))
+	exp.userProcessCount.WithLabelValues(uidStr, username).Set(float64(processCount))
 
 	// Aggiorna stato limite
 	limitedValue := 0.0
 	if isLimited {
 		limitedValue = 1.0
 	}
-	exp.userLimited.WithLabelValues(uidStr, username, strconv.FormatBool(isLimited)).Set(limitedValue)
+	exp.userLimited.WithLabelValues(uidStr, username).Set(limitedValue)
 
 	// Aggiorna eventi memory.high breach (counter con delta)
-	memoryHighKey := fmt.Sprintf("%s_%s", strconv.Itoa(uid), username)
+	memoryHighKey := fmt.Sprintf("%s_%s", uidStr, username)
 	prev := exp.prevMemoryHighEvents[memoryHighKey]
 	if memoryHighEvents > prev {
 		delta := memoryHighEvents - prev
@@ -738,8 +742,7 @@ func (exp *PrometheusExporter) UpdateUserMetrics(uid int, username string, cpuUs
 			}
 		}
 
-		// Aggiorna uso memoria del cgroup
-		cgroupMemory := exp.getCgroupMemoryUsage(cgroupPath)
+		// Aggiorna uso memoria del cgroup (fix #6: use pre-read value, no redundant file read)
 		exp.cgroupMemoryUsage.WithLabelValues(uidStr, cgroupPath).Set(float64(cgroupMemory))
 	}
 }
@@ -750,21 +753,19 @@ func (exp *PrometheusExporter) CleanupUserMetrics(activeUids map[int]bool) {
 		return
 	}
 
-	exp.metricsMu.Lock()
-	defer exp.metricsMu.Unlock()
+	exp.mu.Lock()
+	defer exp.mu.Unlock()
 
 	// Itera su tutti gli utenti tracciati
 	for userKey := range exp.activeUserMetrics {
 		// Controlla se l'utente è ancora attivo
-		parts := strings.SplitN(userKey, "_", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(userKey, "_", 2)
+		if len(parts) != 2 {
 			continue
 		}
 
 		uidStr := parts[0]
 		username := parts[1]
-		isLimitedStr := parts[2]
-		isLimited := isLimitedStr == "true"
 
 		uid, err := strconv.Atoi(uidStr)
 		if err != nil {
@@ -774,10 +775,10 @@ func (exp *PrometheusExporter) CleanupUserMetrics(activeUids map[int]bool) {
 		// Se l'utente non è più attivo, rimuovi le metriche
 		if !activeUids[uid] {
 			// Rimuovi dalle metriche
-			exp.userCPUUsage.DeleteLabelValues(uidStr, username, strconv.FormatBool(isLimited))
-			exp.userMemoryUsage.DeleteLabelValues(uidStr, username, strconv.FormatBool(isLimited))
-			exp.userProcessCount.DeleteLabelValues(uidStr, username, strconv.FormatBool(isLimited))
-			exp.userLimited.DeleteLabelValues(uidStr, username, strconv.FormatBool(isLimited))
+			exp.userCPUUsage.DeleteLabelValues(uidStr, username)
+			exp.userMemoryUsage.DeleteLabelValues(uidStr, username)
+			exp.userProcessCount.DeleteLabelValues(uidStr, username)
+			exp.userLimited.DeleteLabelValues(uidStr, username)
 			exp.userMemoryHighEvents.DeleteLabelValues(uidStr, username)
 			exp.userIOReadBytes.DeleteLabelValues(uidStr, username)
 			exp.userIOWriteBytes.DeleteLabelValues(uidStr, username)
@@ -798,50 +799,6 @@ func (exp *PrometheusExporter) CleanupUserMetrics(activeUids map[int]bool) {
 			)
 		}
 	}
-}
-
-// getUserMemoryUsage calcola l'uso memoria di un utente in bytes
-func (exp *PrometheusExporter) getUserMemoryUsage(uid int) int64 {
-	var totalMemory int64
-
-	// Itera su tutti i processi in /proc
-	procDir := "/proc"
-	entries, err := os.ReadDir(procDir)
-	if err != nil {
-		exp.logger.Warn("Failed to read /proc directory for memory stats", "error", err)
-		return 0
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Verifica se è una directory PID
-		_, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-
-		// Leggi l'UID del processo
-		statusFile := filepath.Join(procDir, entry.Name(), "status")
-		if procUID, err := exp.getUIDFromStatusFile(statusFile); err == nil && procUID == uid {
-			// Leggi l'uso memoria del processo
-			statmFile := filepath.Join(procDir, entry.Name(), "statm")
-			if data, err := os.ReadFile(statmFile); err == nil {
-				fields := strings.Fields(string(data))
-				if len(fields) >= 2 {
-					// Campo 1 è la dimensione residente in pagine
-					pages, err := strconv.ParseInt(fields[1], 10, 64)
-					if err == nil {
-						totalMemory += pages * pageSizeBytes
-					}
-				}
-			}
-		}
-	}
-
-	return totalMemory
 }
 
 // getCgroupMemoryUsage legge l'uso memoria da un cgroup specifico
@@ -869,32 +826,6 @@ func (exp *PrometheusExporter) UpdateSystemMetrics(totalCores int, actionCores i
 	exp.totalCores.Set(float64(totalCores))
 	exp.actionCores.Set(float64(actionCores))
 	exp.systemLoad.Set(systemLoad)
-}
-
-// Helper per leggere UID da file status
-func (exp *PrometheusExporter) getUIDFromStatusFile(statusFile string) (int, error) {
-	file, err := os.Open(statusFile)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "Uid:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				uid, err := strconv.Atoi(fields[1])
-				if err != nil {
-					return 0, err
-				}
-				return uid, nil
-			}
-		}
-	}
-
-	return 0, fmt.Errorf("UID not found in status file")
 }
 
 // parseCPUQuota estrae quota e period da una stringa "quota period".

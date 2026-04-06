@@ -18,8 +18,10 @@ package state
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/fdefilippo/resman/cgroup"
 	"github.com/fdefilippo/resman/config"
 	"github.com/fdefilippo/resman/metrics"
 )
@@ -48,6 +50,7 @@ func (m *mockMetricsCollector) GetAllUsersMemoryUsage() uint64 { return 20000000
 func (m *mockMetricsCollector) GetLimitedUsers() []int             { return []int{1000, 1001} }
 func (m *mockMetricsCollector) GetLimitedUsersCPUUsage() float64   { return 30.0 }
 func (m *mockMetricsCollector) GetLimitedUsersMemoryUsage() uint64 { return 1500000000 }
+func (m *mockMetricsCollector) GetUsernameFromUID(uid int) string  { return fmt.Sprintf("user%d", uid) }
 
 type mockCgroupManager struct{}
 
@@ -78,6 +81,15 @@ func (m *mockCgroupManager) ApplyIOLimit(uid int, readBPS, writeBPS string, read
 func (m *mockCgroupManager) RemoveIOLimit(uid int) error { return nil }
 func (m *mockCgroupManager) GetIOStats(uid int) (uint64, uint64, uint64, uint64, error) {
 	return 0, 0, 0, 0, nil
+}
+func (m *mockCgroupManager) GetUserCgroupMetrics(uid int) (string, string, uint64, uint64, uint64, uint64, uint64, error) {
+	return "", "", 0, 0, 0, 0, 0, nil
+}
+func (m *mockCgroupManager) GetPSIStats(uid int) (cgroup.PSIStats, error) {
+	return cgroup.PSIStats{}, nil
+}
+func (m *mockCgroupManager) ApplyTemporaryIOLimit(uid int, readBPS, writeBPS string, readIOPS, writeIOPS int, deviceFilter string, multiplier float64) error {
+	return nil
 }
 func (m *mockCgroupManager) CleanupUserCgroup(uid int) error            { return nil }
 func (m *mockCgroupManager) MoveProcessToCgroup(pid int, uid int) error { return nil }
@@ -136,9 +148,10 @@ func TestMakeDecision(t *testing.T) {
 	cfg.CPUThresholdDuration = 0 // Disable time window for immediate activation
 
 	manager := &Manager{
-		cfg:              cfg,
-		limitsActive:     false,
-		thresholdTracker: &ThresholdTracker{},
+		cfg:                cfg,
+		limitsActive:       false,
+		thresholdTracker:   &ThresholdTracker{},
+		ioThresholdTracker: &ThresholdTracker{},
 	}
 
 	metrics := &SystemMetrics{
@@ -163,9 +176,10 @@ func TestMakeDecisionDeactivate(t *testing.T) {
 	cfg.CPUReleaseThreshold = 40
 
 	manager := &Manager{
-		cfg:              cfg,
-		limitsActive:     true,
-		thresholdTracker: &ThresholdTracker{},
+		cfg:                cfg,
+		limitsActive:       true,
+		thresholdTracker:   &ThresholdTracker{},
+		ioThresholdTracker: &ThresholdTracker{},
 	}
 
 	metrics := &SystemMetrics{
@@ -189,9 +203,10 @@ func TestMakeDecisionMaintain(t *testing.T) {
 	cfg.CPUReleaseThreshold = 40
 
 	manager := &Manager{
-		cfg:              cfg,
-		limitsActive:     false,
-		thresholdTracker: &ThresholdTracker{},
+		cfg:                cfg,
+		limitsActive:       false,
+		thresholdTracker:   &ThresholdTracker{},
+		ioThresholdTracker: &ThresholdTracker{},
 	}
 
 	metrics := &SystemMetrics{

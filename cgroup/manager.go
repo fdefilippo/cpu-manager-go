@@ -20,14 +20,17 @@ package cgroup
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/process"
 
 	"github.com/fdefilippo/resman/config"
 	"github.com/fdefilippo/resman/logging"
@@ -430,6 +433,7 @@ func (m *Manager) MoveProcessToCgroup(pid int, uid int) error {
 }
 
 // MoveAllUserProcesses sposta tutti i processi di un utente nel suo cgroup.
+// Uses gopsutil for efficient process discovery.
 func (m *Manager) MoveAllUserProcesses(uid int) error {
 	m.logger.Debug("Moving all processes for user to cgroup", "uid", uid)
 
@@ -439,43 +443,78 @@ func (m *Manager) MoveAllUserProcesses(uid int) error {
 		return fmt.Errorf("UID 0 (root) processes cannot be moved to user cgroups")
 	}
 
-	// Leggi tutti i PIDs dell'utente da /proc
+	// Try gopsutil first
+	procs, err := process.Processes()
+	if err != nil {
+		m.logger.Debug("gopsutil failed, falling back to /proc scan", "error", err)
+		return m.moveAllUserProcessesFallback(uid)
+	}
+
+	var movedCount, totalProcesses int
+	var processNames, errors []string
+
+	for _, p := range procs {
+		uids, err := p.Uids()
+		if err != nil || len(uids) == 0 || int(uids[0]) != uid {
+			continue
+		}
+
+		totalProcesses++
+		pid := int(p.Pid)
+		processName := m.getProcessName(pid)
+
+		// Salta processi esclusi
+		if m.cfg.IsProcessExcluded(processName) {
+			continue
+		}
+
+		// Sposta il processo
+		if err := m.MoveProcessToCgroup(pid, uid); err != nil {
+			errors = append(errors, fmt.Sprintf("%s[%d]: %v", processName, pid, err))
+		} else {
+			movedCount++
+			processNames = append(processNames, processName)
+		}
+	}
+
+	m.logProcessMoveSummary(uid, movedCount, totalProcesses, processNames, errors)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("some processes could not be moved: %d errors", len(errors))
+	}
+	return nil
+}
+
+// moveAllUserProcessesFallback scans /proc manually if gopsutil fails.
+func (m *Manager) moveAllUserProcessesFallback(uid int) error {
 	procDir := "/proc"
 	entries, err := os.ReadDir(procDir)
 	if err != nil {
 		return fmt.Errorf("failed to read /proc: %w", err)
 	}
 
-	var movedCount int
-	var totalProcesses int
-	var processNames []string
-	var errors []string
+	var movedCount, totalProcesses int
+	var processNames, errors []string
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 
-		// Verifica se è una directory PID numerica
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
-			continue // Non è una directory PID
+			continue
 		}
 
-		// Leggi il UID del processo
 		statusFile := filepath.Join(procDir, entry.Name(), "status")
 		if procUID, err := m.getUIDFromStatusFile(statusFile); err == nil && procUID == uid {
 			totalProcesses++
-
-			// Ottieni nome processo
 			processName := m.getProcessName(pid)
 
-			// Salta processi esclusi da PROCESS_EXCLUDE_LIST
 			if m.cfg.IsProcessExcluded(processName) {
 				continue
 			}
 
-			// Sposta il processo
 			if err := m.MoveProcessToCgroup(pid, uid); err != nil {
 				errors = append(errors, fmt.Sprintf("%s[%d]: %v", processName, pid, err))
 			} else {
@@ -485,10 +524,18 @@ func (m *Manager) MoveAllUserProcesses(uid int) error {
 		}
 	}
 
-	// Log riepilogativo con elenco processi
+	m.logProcessMoveSummary(uid, movedCount, totalProcesses, processNames, errors)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("some processes could not be moved: %d errors", len(errors))
+	}
+	return nil
+}
+
+// logProcessMoveSummary logs a summary of process movement.
+func (m *Manager) logProcessMoveSummary(uid, movedCount, totalProcesses int, processNames, errors []string) {
 	if movedCount > 0 {
 		if len(processNames) <= 10 {
-			// Se pochi processi, mostra tutti
 			m.logger.Info("User processes moved to cgroup",
 				"uid", uid,
 				"moved_count", movedCount,
@@ -498,7 +545,6 @@ func (m *Manager) MoveAllUserProcesses(uid int) error {
 				"success_rate", fmt.Sprintf("%.1f%%", float64(movedCount)/float64(totalProcesses)*100),
 			)
 		} else {
-			// Se molti processi, mostra solo i primi 10
 			m.logger.Info("User processes moved to cgroup",
 				"uid", uid,
 				"moved_count", movedCount,
@@ -522,11 +568,8 @@ func (m *Manager) MoveAllUserProcesses(uid int) error {
 			"uid", uid,
 			"first_error", errors[0],
 			"total_errors", len(errors),
-			"success_rate", fmt.Sprintf("%.1f%%", float64(movedCount)/float64(totalProcesses)*100),
 		)
 	}
-
-	return nil
 }
 
 // CreateSharedCgroup crea un cgroup condiviso per tutti gli utenti limitati
@@ -660,13 +703,53 @@ func (m *Manager) MoveProcessToSharedCgroup(pid int, sharedPath string, uid int)
 }
 
 // MoveAllUserProcessesToSharedCgroup sposta tutti i processi di un utente nel cgroup condiviso
+// Uses gopsutil for efficient process discovery.
 func (m *Manager) MoveAllUserProcessesToSharedCgroup(uid int, sharedPath string) error {
 	m.logger.Debug("Moving all processes for user to shared cgroup",
 		"uid", uid,
 		"shared_path", sharedPath,
 	)
 
-	// Leggi tutti i PIDs dell'utente da /proc
+	// Try gopsutil first
+	procs, err := process.Processes()
+	if err != nil {
+		m.logger.Debug("gopsutil failed, falling back to /proc scan", "error", err)
+		return m.moveAllUserProcessesToSharedCgroupFallback(uid, sharedPath)
+	}
+
+	var movedCount int
+	var errors []string
+
+	for _, p := range procs {
+		uids, err := p.Uids()
+		if err != nil || len(uids) == 0 || int(uids[0]) != uid {
+			continue
+		}
+
+		pid := int(p.Pid)
+		processName := m.getProcessName(pid)
+
+		if m.cfg.IsProcessExcluded(processName) {
+			continue
+		}
+
+		if err := m.MoveProcessToSharedCgroup(pid, sharedPath, uid); err != nil {
+			errors = append(errors, fmt.Sprintf("PID %d: %v", pid, err))
+		} else {
+			movedCount++
+		}
+	}
+
+	m.logSharedProcessMoveSummary(uid, movedCount, errors)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("some processes could not be moved: %d errors", len(errors))
+	}
+	return nil
+}
+
+// moveAllUserProcessesToSharedCgroupFallback scans /proc manually if gopsutil fails.
+func (m *Manager) moveAllUserProcessesToSharedCgroupFallback(uid int, sharedPath string) error {
 	procDir := "/proc"
 	entries, err := os.ReadDir(procDir)
 	if err != nil {
@@ -681,24 +764,19 @@ func (m *Manager) MoveAllUserProcessesToSharedCgroup(uid int, sharedPath string)
 			continue
 		}
 
-		// Verifica se è una directory PID numerica
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
-			continue // Non è una directory PID
+			continue
 		}
 
-		// Leggi il UID del processo
 		statusFile := filepath.Join(procDir, entry.Name(), "status")
 		if procUID, err := m.getUIDFromStatusFile(statusFile); err == nil && procUID == uid {
-			// Ottieni nome processo
 			processName := m.getProcessName(pid)
 
-			// Salta processi esclusi da PROCESS_EXCLUDE_LIST
 			if m.cfg.IsProcessExcluded(processName) {
 				continue
 			}
 
-			// Sposta il processo
 			if err := m.MoveProcessToSharedCgroup(pid, sharedPath, uid); err != nil {
 				errors = append(errors, fmt.Sprintf("PID %d: %v", pid, err))
 			} else {
@@ -707,6 +785,16 @@ func (m *Manager) MoveAllUserProcessesToSharedCgroup(uid int, sharedPath string)
 		}
 	}
 
+	m.logSharedProcessMoveSummary(uid, movedCount, errors)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("some processes could not be moved: %d errors", len(errors))
+	}
+	return nil
+}
+
+// logSharedProcessMoveSummary logs a summary of shared cgroup process movement.
+func (m *Manager) logSharedProcessMoveSummary(uid, movedCount int, errors []string) {
 	if movedCount > 0 {
 		m.logger.Debug("Processes moved to shared cgroup",
 			"uid", uid,
@@ -727,8 +815,6 @@ func (m *Manager) MoveAllUserProcessesToSharedCgroup(uid int, sharedPath string)
 			"total_errors", len(errors),
 		)
 	}
-
-	return nil
 }
 
 // getUIDFromStatusFile estrae il UID dal file /proc/[pid]/status.
@@ -835,12 +921,12 @@ func (m *Manager) CleanupAll() error {
 	}
 	m.mu.Unlock()
 
-	var errors []string
+	var cleanupErrs []string
 
 	// Clean up all known cgroups from the atomic copy
 	for _, uid := range uids {
 		if err := m.CleanupUserCgroup(uid); err != nil {
-			errors = append(errors, fmt.Sprintf("UID %d: %v", uid, err))
+			cleanupErrs = append(cleanupErrs, fmt.Sprintf("UID %d: %v", uid, err))
 		}
 	}
 
@@ -865,8 +951,11 @@ func (m *Manager) CleanupAll() error {
 							"count", len(pids),
 						)
 						rootCgroupProcs := filepath.Join(m.cfg.CgroupRoot, "cgroup.procs")
-						for _, pid := range pids {
-							os.WriteFile(rootCgroupProcs, []byte(fmt.Sprintf("%d", pid)), 0644)
+						if err := m.writePidsBatch(rootCgroupProcs, pids); err != nil {
+							m.logger.Debug("Failed to move some processes out of user cgroup",
+								"from", userPath,
+								"error", err,
+							)
 						}
 					}
 
@@ -875,7 +964,7 @@ func (m *Manager) CleanupAll() error {
 							"path", userPath,
 							"error", err,
 						)
-						errors = append(errors, fmt.Sprintf("user cgroup %s: %v", userPath, err))
+						cleanupErrs = append(cleanupErrs, fmt.Sprintf("user cgroup %s: %v", userPath, err))
 					} else {
 						m.logger.Info("User sub-cgroup removed", "path", userPath)
 					}
@@ -891,10 +980,10 @@ func (m *Manager) CleanupAll() error {
 				"count", len(pids),
 			)
 			rootCgroupProcs := filepath.Join(m.cfg.CgroupRoot, "cgroup.procs")
-			for _, pid := range pids {
-				if err := os.WriteFile(rootCgroupProcs, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
-					m.logger.Debug("Failed to move process", "pid", pid, "error", err)
-				}
+			if err := m.writePidsBatch(rootCgroupProcs, pids); err != nil {
+				m.logger.Debug("Failed to move some processes out of shared cgroup",
+					"error", err,
+				)
 			}
 			// Aspetta che il kernel process lo spostamento
 			time.Sleep(200 * time.Millisecond)
@@ -906,7 +995,7 @@ func (m *Manager) CleanupAll() error {
 				"path", sharedPath,
 				"remaining_count", len(pids),
 			)
-			errors = append(errors, fmt.Sprintf("shared cgroup still has %d processes", len(pids)))
+			cleanupErrs = append(cleanupErrs, fmt.Sprintf("shared cgroup still has %d processes", len(pids)))
 		}
 
 		// STEP 4: Ora prova a rimuovere il cgroup condiviso
@@ -916,7 +1005,7 @@ func (m *Manager) CleanupAll() error {
 				"path", sharedPath,
 				"error", err,
 			)
-			errors = append(errors, fmt.Sprintf("shared cgroup: %v", err))
+			cleanupErrs = append(cleanupErrs, fmt.Sprintf("shared cgroup: %v", err))
 		} else {
 			m.logger.Info("Shared cgroup removed successfully", "path", sharedPath)
 		}
@@ -939,12 +1028,17 @@ func (m *Manager) CleanupAll() error {
 
 	// Pulisci il file di tracciamento
 	if err := os.Remove(m.createdCgroupsFile); err != nil && !os.IsNotExist(err) {
-		errors = append(errors, fmt.Sprintf("tracking file: %v", err))
+		cleanupErrs = append(cleanupErrs, fmt.Sprintf("tracking file: %v", err))
 	}
 
-	if len(errors) > 0 {
-		m.logger.Warn("Cleanup completed with errors", "error_count", len(errors))
-		return fmt.Errorf("errors during cleanup: %s", strings.Join(errors, "; "))
+	if len(cleanupErrs) > 0 {
+		m.logger.Warn("Cleanup completed with errors", "error_count", len(cleanupErrs))
+		// Convert string errors to error type for errors.Join
+		errs := make([]error, len(cleanupErrs))
+		for i, e := range cleanupErrs {
+			errs[i] = fmt.Errorf("%s", e)
+		}
+		return fmt.Errorf("errors during cleanup: %w", errors.Join(errs...))
 	}
 
 	m.logger.Info("All cgroups cleaned up successfully")
@@ -1072,6 +1166,24 @@ func (m *Manager) readPidsFromFile(filePath string) ([]int, error) {
 	return pids, nil
 }
 
+// writePidsBatch scrive una slice di PIDs in un file cgroup.procs in batch.
+func (m *Manager) writePidsBatch(filePath string, pids []int) error {
+	if len(pids) == 0 {
+		return nil
+	}
+
+	// Converti i PID in stringhe separate da newline
+	var sb strings.Builder
+	for i, pid := range pids {
+		sb.WriteString(strconv.Itoa(pid))
+		if i < len(pids)-1 {
+			sb.WriteByte('\n')
+		}
+	}
+
+	return os.WriteFile(filePath, []byte(sb.String()), 0644)
+}
+
 // isValidCPUQuotaFormat valida il formato della quota CPU.
 func isValidCPUQuotaFormat(quota string) bool {
 	parts := strings.Fields(quota)
@@ -1125,13 +1237,30 @@ func (m *Manager) GetCgroupInfo(uid int) (map[string]string, error) {
 		info["cpu.weight"] = strings.TrimSpace(string(data))
 	}
 
-	// Conta i processi nel cgroup
-	procsFile := filepath.Join(cgroupPath, "cgroup.procs")
-	if pids, err := m.readPidsFromFile(procsFile); err == nil {
-		info["process_count"] = strconv.Itoa(len(pids))
+	return info, nil
+}
+
+// GetUserCgroupMetrics legge tutte le metriche cgroup per un utente in una sola chiamata.
+// Evita letture multiple di file cgroup separati.
+func (m *Manager) GetUserCgroupMetrics(uid int) (cgroupPath, cpuQuota string, memoryHighEvents uint64, ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps uint64, err error) {
+	cgroupPath, exists := m.getCgroupPath(uid)
+	if !exists {
+		return "", "", 0, 0, 0, 0, 0, fmt.Errorf("cgroup for UID %d not found", uid)
 	}
 
-	return info, nil
+	// Leggi cpu.max
+	cpuMaxFile := filepath.Join(cgroupPath, "cpu.max")
+	if data, readErr := os.ReadFile(cpuMaxFile); readErr == nil {
+		cpuQuota = strings.TrimSpace(string(data))
+	}
+
+	// Leggi memory.high events
+	memoryHighEvents, _ = m.GetMemoryHighEvents(uid)
+
+	// Leggi io.stat
+	ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps, _ = m.GetIOStats(uid)
+
+	return cgroupPath, cpuQuota, memoryHighEvents, ioReadBytes, ioWriteBytes, ioReadOps, ioWriteOps, nil
 }
 
 // getProcessInfo restituisce informazioni dettagliate su un processo
@@ -1156,10 +1285,25 @@ func (m *Manager) getProcessInfo(pid int) (map[string]string, error) {
 		}
 	}
 
-	// Username da getent
-	cmd := exec.Command("ps", "-o", "user=", "-p", strconv.Itoa(pid))
-	if output, err := cmd.Output(); err == nil {
-		info["username"] = strings.TrimSpace(string(output))
+	// Username da /proc/[pid]/status (campo Uid:) + cache lookup
+	// Evita exec.Command("ps") che è costoso (fork+exec per ogni processo)
+	statusFile := fmt.Sprintf("/proc/%d/status", pid)
+	if data, err := os.ReadFile(statusFile); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "Uid:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					uidStr := fields[1]
+					// Usa os/user.LookupId per supportare LDAP/NIS con CGO
+					if u, lookupErr := user.LookupId(uidStr); lookupErr == nil {
+						info["username"] = u.Username
+					} else {
+						info["username"] = uidStr
+					}
+				}
+				break
+			}
+		}
 	}
 
 	// CPU usage corrente
@@ -1537,4 +1681,68 @@ func (m *Manager) GetIOStats(uid int) (readBytes, writeBytes uint64, readOps, wr
 	}
 
 	return readBytes, writeBytes, readOps, writeOps, nil
+}
+
+// ApplyTemporaryIOLimit applica limiti IO temporanei con un moltiplicatore.
+// Salva i limiti originali per permettere il revert.
+func (m *Manager) ApplyTemporaryIOLimit(uid int, readBPS, writeBPS string, readIOPS, writeIOPS int, deviceFilter string, multiplier float64) error {
+	if _, exists := m.getCgroupPath(uid); !exists {
+		return fmt.Errorf("cgroup for UID %d not found", uid)
+	}
+
+	// Applica limiti boostati (moltiplicati)
+	boostedReadBPS := applyMultiplierToBPS(readBPS, multiplier)
+	boostedWriteBPS := applyMultiplierToBPS(writeBPS, multiplier)
+	boostedReadIOPS := int(float64(readIOPS) * multiplier)
+	boostedWriteIOPS := int(float64(writeIOPS) * multiplier)
+
+	return m.ApplyIOLimit(uid, boostedReadBPS, boostedWriteBPS, boostedReadIOPS, boostedWriteIOPS, deviceFilter)
+}
+
+// applyMultiplierToBPS applica un moltiplicatore a una stringa BPS.
+func applyMultiplierToBPS(bps string, multiplier float64) string {
+	if bps == "" || bps == "max" || bps == "0" {
+		return "max"
+	}
+	// Parse byte value (supports K, M, G, T suffixes)
+	val := parseBPSValue(bps)
+	if val == 0 {
+		return "max"
+	}
+	boosted := uint64(float64(val) * multiplier)
+	return strconv.FormatUint(boosted, 10)
+}
+
+// parseBPSValue converte una stringa BPS in bytes.
+func parseBPSValue(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return 0
+	}
+
+	// Check for suffix
+	lastChar := strings.ToUpper(s[len(s)-1:])
+	multiplier := uint64(1)
+	numStr := s
+
+	switch lastChar {
+	case "K":
+		multiplier = 1024
+		numStr = s[:len(s)-1]
+	case "M":
+		multiplier = 1024 * 1024
+		numStr = s[:len(s)-1]
+	case "G":
+		multiplier = 1024 * 1024 * 1024
+		numStr = s[:len(s)-1]
+	case "T":
+		multiplier = 1024 * 1024 * 1024 * 1024
+		numStr = s[:len(s)-1]
+	}
+
+	val, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return val * multiplier
 }
