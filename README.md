@@ -16,7 +16,7 @@
 - **IO limiting** with cgroups v2 io controller (bandwidth and IOPS)
 - **Per-user resource tracking**: CPU%, Memory (bytes), Process count, IO bytes/ops
 - **Threshold time window** to prevent false activations (CPU_THRESHOLD_DURATION, IO_THRESHOLD_DURATION)
-- **Blackout timeframes** support (BLACKOUT)
+- **Blackout timeframes** support (CPU_MANAGER_BLACKOUT)
 
 ### User Filtering (v1.18.0+)
 Clear separation between **ALL USERS** (monitoring) and **LIMITED USERS** (subset passing filters):
@@ -345,18 +345,18 @@ Each controller has independent user filter lists:
 ### Blackout Timeframes
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BLACKOUT` | Empty | When NOT to apply limits (format: "days hours") |
+| `CPU_MANAGER_BLACKOUT` | Empty | When NOT to apply limits (format: "days hours") |
 
 **Examples:**
 ```bash
 # Business hours (Mon-Fri, 8-18)
-BLACKOUT=1-5 08-18
+CPU_MANAGER_BLACKOUT=1-5 08-18
 
 # Weekends
-BLACKOUT=0,6 00-23
+CPU_MANAGER_BLACKOUT=0,6 00-23
 
 # Business hours + weekends
-BLACKOUT=1-5 08-18;0,6 00-23
+CPU_MANAGER_BLACKOUT=1-5 08-18;0,6 00-23
 ```
 
 ### Database

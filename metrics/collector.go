@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fdefilippo/resman/config"
@@ -42,7 +41,6 @@ const (
 	jiffiesPerSecond       = 100.0
 	cpuUsageEstimateFactor = 0.1
 	pageSizeBytes          = 4096
-	procCacheShardCount    = 64 // Number of shards for process CPU cache
 )
 
 // UserMetrics contains metrics for a single user.
@@ -55,61 +53,12 @@ type UserMetrics struct {
 	IsLimited    bool    // Whether user has CPU limits applied
 }
 
-// procCacheShard holds CPU timing data for a subset of PIDs.
-type procCacheShard struct {
+// procCache holds CPU timing data for all PIDs.
+// Uses single mutex instead of sharding for simplicity and deadlock safety.
+type procCache struct {
 	mu           sync.RWMutex
 	prevProcCPU  map[int32]cpu.TimesStat
 	prevProcTime map[int32]time.Time
-}
-
-// getShard returns the shard index for a given PID.
-func getShard(pid int32) int {
-	return int(pid) % procCacheShardCount
-}
-
-// findAndRemoveOldestPID finds and removes the oldest entry across all shards.
-// Must be called when a new entry needs to be added but cache is full.
-// Returns true if an entry was removed.
-func (c *Collector) findAndRemoveOldestPID() bool {
-	// Lock all shards in consistent order
-	for i := 0; i < procCacheShardCount; i++ {
-		c.procCacheShards[i].mu.Lock()
-	}
-	defer func() {
-		for i := 0; i < procCacheShardCount; i++ {
-			c.procCacheShards[i].mu.Unlock()
-		}
-	}()
-
-	var oldestPID int32
-	var oldestTime time.Time
-	first := true
-
-	// Find oldest entry across all shards
-	for i := 0; i < procCacheShardCount; i++ {
-		shard := c.procCacheShards[i]
-		for pid, ts := range shard.prevProcTime {
-			if first || ts.Before(oldestTime) {
-				oldestTime = ts
-				oldestPID = pid
-				first = false
-			}
-		}
-	}
-
-	if first {
-		// No entries found
-		return false
-	}
-
-	// Remove the oldest entry
-	shardIdx := getShard(oldestPID)
-	shard := c.procCacheShards[shardIdx]
-	// We already hold this shard's lock (since we locked all shards)
-	delete(shard.prevProcCPU, oldestPID)
-	delete(shard.prevProcTime, oldestPID)
-	atomic.AddInt32(&c.procCacheSize, -1)
-	return true
 }
 
 // userData is a temporary structure for accumulating data per UID during /proc scan.
@@ -135,8 +84,7 @@ type Collector struct {
 	prevCPUTime  time.Time
 
 	// Cache per CPU usage per processo (necessaria per calcolo delta)
-	procCacheShards [procCacheShardCount]*procCacheShard
-	procCacheSize   int32 // Total entries across all shards (atomic)
+	procCache *procCache // Single cache instead of sharding
 
 	// Database writer (opzionale)
 	dbWriter *DBWriter
@@ -175,14 +123,10 @@ func NewCollector(cfg *config.Config) (*Collector, error) {
 		usernameCacheTTL:  DEFAULT_USERNAME_CACHE_TTL,
 		stopCleanup:       make(chan struct{}),
 		cleanupDone:       make(chan struct{}),
-	}
-
-	// Inizializza shard per cache CPU processi
-	for i := 0; i < procCacheShardCount; i++ {
-		collector.procCacheShards[i] = &procCacheShard{
+		procCache: &procCache{
 			prevProcCPU:  make(map[int32]cpu.TimesStat),
 			prevProcTime: make(map[int32]time.Time),
-		}
+		},
 	}
 
 	go collector.periodicCleanup()
@@ -400,58 +344,8 @@ func (c *Collector) GetUserCPUUsage(uid int) float64 {
 	return totalUsage
 }
 
-// getUserCPUUsageFallback usa ps per ottenere l'uso CPU (simile allo script Bash).
-func (c *Collector) getUserCPUUsageFallback(uid int) float64 {
-	// Costruisci il comando ps
-	// cmd := fmt.Sprintf("ps -U %d -o pcpu=", uid)
-
-	// Esegui il comando e parsa l'output
-	// Nota: In produzione, useremmo os/exec invece di eseguire shell commands
-	// Per ora implementiamo una versione semplificata
-	return c.getUserCPUUsageFromProc(uid)
-}
-
-// getUserCPUUsageFromProc calcola l'uso CPU leggendo da /proc.
-func (c *Collector) getUserCPUUsageFromProc(uid int) float64 {
-	var totalUsage float64
-
-	// Itera su tutte le directory in /proc
-	procDir := "/proc"
-	entries, err := os.ReadDir(procDir)
-	if err != nil {
-		c.logger.Warn("Failed to read /proc directory", "error", err)
-		return 0.0
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Verifica se è una directory PID
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-
-		// Leggi l'UID del processo
-		statusFile := filepath.Join(procDir, entry.Name(), "status")
-		procUID, err := c.getUIDFromStatusFile(statusFile)
-		if err != nil || procUID != uid {
-			continue
-		}
-
-		// Leggi l'uso CPU del processo
-		cpuUsage, err := c.getProcessCPUUsage(pid)
-		if err == nil {
-			totalUsage += cpuUsage
-		}
-	}
-
-	return totalUsage
-}
-
 // getUIDFromStatusFile legge l'UID da /proc/[pid]/status.
+// Used by fallback functions when gopsutil is unavailable.
 func (c *Collector) getUIDFromStatusFile(statusFile string) (int, error) {
 	file, err := os.Open(statusFile)
 	if err != nil {
@@ -475,56 +369,6 @@ func (c *Collector) getUIDFromStatusFile(statusFile string) (int, error) {
 	}
 
 	return 0, fmt.Errorf("UID not found")
-}
-
-// getProcessCPUUsage calcola l'uso CPU di un singolo processo.
-func (c *Collector) getProcessCPUUsage(pid int) (float64, error) {
-	statFile := fmt.Sprintf("/proc/%d/stat", pid)
-
-	// Leggi il file stat del processo
-	content, err := os.ReadFile(statFile)
-	if err != nil {
-		return 0.0, err
-	}
-
-	// Parse dei dati del processo per calcolare l'uso CPU
-	// Il formato di /proc/[pid]/stat è complesso
-	// Per una implementazione semplifica, leggiamo il tempo CPU
-	stats := strings.Fields(string(content))
-	if len(stats) < 15 {
-		return 0.0, fmt.Errorf("invalid stat format for PID %d", pid)
-	}
-
-	// Tempo CPU speso in user mode (jiffies) - campo 13
-	// Tempo CPU speso in kernel mode (jiffies) - campo 14
-	utime, err1 := strconv.ParseUint(stats[13], 10, 64)
-	stime, err2 := strconv.ParseUint(stats[14], 10, 64)
-
-	if err1 != nil || err2 != nil {
-		return 0.0, fmt.Errorf("failed to parse CPU times for PID %d", pid)
-	}
-
-	// Per calcolare la percentuale CPU, dovremmo:
-	// 1. Salvare i valori precedenti
-	// 2. Calcolare la differenza tra due letture
-	// 3. Dividere per il tempo trascorso
-
-	// Per ora, restituiamo una stima molto semplificata
-	// In una implementazione completa, dovremmo implementare la cache
-	// e il calcolo delle differenze
-
-	// Stima semplificata: (utime + stime) in jiffies
-	// 1 jiffy = tipicamente 10ms = 0.01s
-	totalJiffies := float64(utime + stime)
-
-	// Converti in secondi (assumendo 100 jiffies/secondo)
-	cpuSeconds := totalJiffies / 100.0
-
-	// Per ottenere una percentuale, dovremmo dividere per il tempo di esecuzione
-	// del processo. Per semplicità, restituiamo un valore basso.
-	// In produzione, implementeremmo la logica completa.
-
-	return cpuSeconds * 0.1, nil // Stima molto approssimativa
 }
 
 // GetAllUsersCPUUsage restituisce l'uso CPU totale di TUTTI gli utenti (UID >= SYSTEM_UID_MIN).
@@ -753,39 +597,6 @@ func (c *Collector) getUsernameFromPasswd(uid int) (string, error) {
 // GetUsernameFromUID ritorna la username dato un UID (public alias)
 func (c *Collector) GetUsernameFromUID(uid int) string {
 	return c.getUsername(uid)
-}
-
-// getActiveUsersFromProc legge gli utenti attivi da /proc.
-func (c *Collector) getActiveUsersFromProc() map[int]bool {
-	uidMap := make(map[int]bool)
-
-	procDir := "/proc"
-	entries, err := os.ReadDir(procDir)
-	if err != nil {
-		c.logger.Warn("Failed to read /proc directory", "error", err)
-		return uidMap
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Verifica se è una directory PID
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-
-		// Leggi l'UID
-		statusFile := filepath.Join(procDir, entry.Name(), "status")
-		if uid, err := c.getUIDFromStatusFile(statusFile); err == nil {
-			if c.isValidUserUID(uid) {
-				uidMap[uid] = true
-			}
-		}
-	}
-
-	return uidMap
 }
 
 // GetMemoryUsage restituisce l'uso della memoria in MB.
@@ -1082,28 +893,35 @@ func (c *Collector) cleanupCache() {
 	}
 
 	// Pulisci anche la cache dei processi CPU (processi vecchi > 5 minuti)
-	for i := 0; i < procCacheShardCount; i++ {
-		shard := c.procCacheShards[i]
-		shard.mu.Lock()
-		for pid, timestamp := range shard.prevProcTime {
+	if c.procCache != nil {
+		c.procCache.mu.Lock()
+		for pid, timestamp := range c.procCache.prevProcTime {
 			if now.Sub(timestamp) > 5*time.Minute {
-				delete(shard.prevProcCPU, pid)
-				delete(shard.prevProcTime, pid)
-				atomic.AddInt32(&c.procCacheSize, -1)
+				delete(c.procCache.prevProcCPU, pid)
+				delete(c.procCache.prevProcTime, pid)
 			}
 		}
-		shard.mu.Unlock()
+		c.procCache.mu.Unlock()
 	}
 
 	// Pulisci anche la cache username (utenti non risolti da > TTL)
 	c.usernameCacheMutex.Lock()
+	cleanedCount := 0
 	for uid, timestamp := range c.usernameCacheTime {
 		if now.Sub(timestamp) > c.usernameCacheTTL {
 			delete(c.usernameCache, uid)
 			delete(c.usernameCacheTime, uid)
+			cleanedCount++
 		}
 	}
 	c.usernameCacheMutex.Unlock()
+
+	if cleanedCount > 0 {
+		c.logger.Debug("Username cache cleanup completed",
+			"cleaned_entries", cleanedCount,
+			"remaining", len(c.usernameCache),
+		)
+	}
 }
 
 // ClearCache svuota la cache.
@@ -1456,23 +1274,21 @@ func (c *Collector) getProcessCPUUsageSimple(pid int) float64 {
 // Più efficiente quando l'handle è già disponibile (evita chiamata a process.NewProcess).
 func (c *Collector) getProcessCPUUsageSimpleWithHandle(proc *process.Process) float64 {
 	pid32 := proc.Pid
-	shardIdx := getShard(pid32)
-	shard := c.procCacheShards[shardIdx]
 
 	// Ottieni tempi CPU attuali
 	times, err := proc.Times()
-	if err != nil {
+	if err != nil || c.procCache == nil {
 		return 0
 	}
 
 	now := time.Now()
 
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	c.procCache.mu.Lock()
+	defer c.procCache.mu.Unlock()
 
 	// Controlla se abbiamo un campione precedente
-	if prevTimes, ok := shard.prevProcCPU[pid32]; ok {
-		if prevTime, ok := shard.prevProcTime[pid32]; ok {
+	if prevTimes, ok := c.procCache.prevProcCPU[pid32]; ok {
+		if prevTime, ok := c.procCache.prevProcTime[pid32]; ok {
 			// Calcola tempo trascorso in secondi
 			elapsed := now.Sub(prevTime).Seconds()
 			if elapsed > 0 {
@@ -1482,8 +1298,8 @@ func (c *Collector) getProcessCPUUsageSimpleWithHandle(proc *process.Process) fl
 				cpuPercent := (delta / elapsed) * cpuPercentMultiplier
 
 				// Aggiorna campione corrente
-				shard.prevProcCPU[pid32] = *times
-				shard.prevProcTime[pid32] = now
+				c.procCache.prevProcCPU[pid32] = *times
+				c.procCache.prevProcTime[pid32] = now
 
 				return cpuPercent
 			}
@@ -1492,22 +1308,27 @@ func (c *Collector) getProcessCPUUsageSimpleWithHandle(proc *process.Process) fl
 
 	// Primo campione: salva e ritorna 0
 	// Se cache è piena, rimuovi entry più vecchia (LRU)
-	if atomic.LoadInt32(&c.procCacheSize) >= MAX_PROC_CACHE_SIZE {
-		// Cache full, need to remove oldest entry
-		// Release shard lock to avoid deadlock with findAndRemoveOldestPID
-		shard.mu.Unlock()
-		removed := c.findAndRemoveOldestPID()
-		shard.mu.Lock()
-		if !removed {
-			// Should not happen, but if no entry was removed, we can't add new one
-			return 0
+	if len(c.procCache.prevProcCPU) >= MAX_PROC_CACHE_SIZE {
+		// Find and remove oldest entry
+		var oldestPID int32
+		var oldestTime time.Time
+		first := true
+		for pid, ts := range c.procCache.prevProcTime {
+			if first || ts.Before(oldestTime) {
+				oldestTime = ts
+				oldestPID = pid
+				first = false
+			}
+		}
+		if !first {
+			delete(c.procCache.prevProcCPU, oldestPID)
+			delete(c.procCache.prevProcTime, oldestPID)
 		}
 	}
 
 	// Aggiungi nuova entry
-	shard.prevProcCPU[pid32] = *times
-	shard.prevProcTime[pid32] = now
-	atomic.AddInt32(&c.procCacheSize, 1)
+	c.procCache.prevProcCPU[pid32] = *times
+	c.procCache.prevProcTime[pid32] = now
 	return 0
 }
 
