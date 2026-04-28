@@ -142,13 +142,11 @@ install -m 644 config/resman.conf.example %{buildroot}/%{_docdir}/%{name}/
 
 # Installa documentazione TLS
 install -m 644 docs/alerting-rules.yml %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
+install -m 644 docs/dashboard-grafana-operations.json %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 
 # Installa script generazione certificati TLS
 install -d %{buildroot}/%{_docdir}/%{name}/scripts
 install -m 755 docs/generate-tls-certs.sh %{buildroot}/%{_docdir}/%{name}/scripts/ 2>/dev/null || true
-
-# Installa CHANGELOG (solo se esiste nel tarball)
-install -m 644 CHANGELOG.md %{buildroot}/%{_docdir}/%{name}/ 2>/dev/null || true
 
 # Installazione file di configurazione syslog
 install -d %{buildroot}%{_sysconfdir}/rsyslog.d
@@ -169,7 +167,7 @@ install -d -m 700 %{buildroot}/%{_sysconfdir}/resman/tls
 # Pre-install script
 if [ $1 -eq 1 ]; then
     # Nuova installazione
-    echo "Preparing for CPU Manager installation..."
+    echo "Preparing for Resource Manager installation..."
 
     # Verifica cgroups v2
     if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
@@ -200,7 +198,7 @@ if ! grep -q "+cpuset" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
     echo "+cpuset" >> /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
 fi
 
-echo "CPU Manager installed successfully!"
+echo "Resource Manager installed successfully!"
 echo ""
 echo "Configuration file: /etc/resman.conf"
 echo "Log file: /var/log/resman.log"
@@ -227,7 +225,6 @@ rmdir /var/run/resman 2>/dev/null || true
 %files
 %license LICENSE
 %doc README.md
-%doc CHANGELOG.md
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/resman.conf
 %{_unitdir}/resman.service
@@ -240,9 +237,9 @@ rmdir /var/run/resman 2>/dev/null || true
 %dir %{_docdir}/%{name}
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/LICENSE
-%doc %{_docdir}/%{name}/CHANGELOG.md
 %doc %{_docdir}/%{name}/resman.conf.example
 %doc %{_docdir}/%{name}/alerting-rules.yml
+%doc %{_docdir}/%{name}/dashboard-grafana-operations.json
 %doc %{_docdir}/%{name}/scripts/
 
 %changelog

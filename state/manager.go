@@ -67,6 +67,14 @@ type Manager struct {
 
 	// Control cycle history (inizializzato in NewManager)
 	controlHist *controlHistory
+
+	// IO rate tracking: cumulative bytes from /proc/[pid]/io -> per-second rate
+	prevIOBytes map[int]uint64 // uid -> previous cycle cumulative write bytes
+	prevIOTime  time.Time
+
+	// PSI watcher for per-user adaptive CPU weight boosting
+	psiWatcher  *cgroup.PSIWatcher
+	psiBoostedAt map[int]time.Time // uid -> when last boosted
 }
 
 // ThresholdTracker monitora il superamento della soglia CPU nel tempo
@@ -189,6 +197,8 @@ func NewManager(
 			entries: make([]ControlCycleEntry, 0),
 			maxSize: 100,
 		},
+		prevIOBytes: make(map[int]uint64),
+		psiBoostedAt: make(map[int]time.Time),
 	}
 
 	logger.Info("State manager initialized",
@@ -319,6 +329,11 @@ func (m *Manager) RunControlCycle(ctx context.Context) error {
 		}
 	}
 
+	// 9a. Revert PSI weight boosts that have expired
+	if m.psiWatcher != nil {
+		m.revertPSIBoosts()
+	}
+
 	// 9. Logga il risultato del ciclo
 	m.logger.Info("Control cycle completed",
 		"cycle_id", cycleID,
@@ -361,6 +376,7 @@ type SystemMetrics struct {
 	SystemUnderLoad bool
 	UserCPUUsage    map[int]float64                    // UID -> percentuale
 	UserMetrics     map[int]*resmanmetrics.UserMetrics // Metriche dettagliate per utente
+	EligibleUsers   []int                              // Users passing USER_INCLUDE/USER_EXCLUDE filters
 }
 
 // collectSystemMetrics raccoglie tutte le metriche di sistema necessarie.
@@ -375,16 +391,6 @@ func (m *Manager) collectSystemMetrics() (*SystemMetrics, error) {
 	metrics.TotalCores = m.metricsCollector.GetTotalCores()
 	metrics.TotalCPUUsage = m.metricsCollector.GetTotalCPUUsage()
 
-	// ALL USERS metrics
-	metrics.AllUsersCPUUsage = m.metricsCollector.GetAllUsersCPUUsage()
-	metrics.AllUsersMemoryUsage = m.metricsCollector.GetAllUsersMemoryUsage()
-	metrics.AllUsersCount = len(m.metricsCollector.GetAllUsers())
-
-	// LIMITED USERS metrics
-	metrics.LimitedUsersCPUUsage = m.metricsCollector.GetLimitedUsersCPUUsage()
-	metrics.LimitedUsersMemoryUsage = m.metricsCollector.GetLimitedUsersMemoryUsage()
-	metrics.LimitedUsersCount = len(m.metricsCollector.GetLimitedUsers())
-
 	metrics.MemoryUsage = m.metricsCollector.GetMemoryUsage()
 	metrics.TotalMemoryMB = m.metricsCollector.GetTotalMemoryMB()
 	metrics.CachedMemoryMB = m.metricsCollector.GetCachedMemoryMB()
@@ -393,14 +399,23 @@ func (m *Manager) collectSystemMetrics() (*SystemMetrics, error) {
 	// Raccogli metriche dettagliate per ogni utente (CPU, memoria, processi) in una sola chiamata
 	allUserMetrics := m.metricsCollector.GetAllUserMetrics()
 
-	// Popola UserMetrics e UserCPUUsage
+	// Singola passata per calcolare tutti gli aggregati:
+	// - AllUsers (CPU, memory, count)
+	// - EligibleUsers (IsLimited == true dal collector)
+	// - LimitedUsers (runtime active)
+	// - UserMetrics e UserCPUUsage sovrascrivendo IsLimited con stato runtime
 	for uid, um := range allUserMetrics {
+		metrics.AllUsersCPUUsage += um.CPUUsage
+		metrics.AllUsersMemoryUsage += um.MemoryUsage
+		metrics.AllUsersCount++
+
+		metrics.UserCPUUsage[uid] = um.CPUUsage
+
 		// FIX M2: Override IsLimited based on actual runtime state, not config
 		m.mu.RLock()
 		actuallyLimited := m.activeUsers[uid]
 		m.mu.RUnlock()
 
-		// Create a copy with corrected IsLimited AND preserved IO fields
 		corrected := &resmanmetrics.UserMetrics{
 			UID:             um.UID,
 			Username:        um.Username,
@@ -416,15 +431,33 @@ func (m *Manager) collectSystemMetrics() (*SystemMetrics, error) {
 			IOWriteOps:      um.IOWriteOps,
 		}
 		metrics.UserMetrics[uid] = corrected
-		metrics.UserCPUUsage[uid] = um.CPUUsage
-	}
 
-	// Calcola aggregate RAM e IO per limited users (per soglie in makeDecision)
-	limitedUsers := m.metricsCollector.GetLimitedUsers()
-	for _, uid := range limitedUsers {
-		if um, ok := allUserMetrics[uid]; ok {
+		// Eligible users: quelli che superano i filtri di configurazione
+		if um.IsLimited {
+			metrics.EligibleUsers = append(metrics.EligibleUsers, uid)
+			metrics.LimitedUsersCPUUsage += um.CPUUsage
+			metrics.LimitedUsersMemoryUsage += um.MemoryUsage
 			metrics.LimitedUsersRAMUsageBytes += um.MemoryUsage
-			metrics.LimitedUsersIOWriteBytes += um.IOWriteBytes
+
+			// Calcola IO rate (bytes/sec) dal delta rispetto al ciclo precedente
+			ioDelta := um.IOWriteBytes
+			if prev, ok := m.prevIOBytes[uid]; ok && !m.prevIOTime.IsZero() {
+				elapsed := time.Since(m.prevIOTime).Seconds()
+				if elapsed > 0 && ioDelta >= prev {
+					ioRate := float64(ioDelta-prev) / elapsed
+					metrics.LimitedUsersIOWriteBytes += uint64(ioRate)
+				}
+			}
+			m.prevIOBytes[uid] = ioDelta
+		}
+	}
+	metrics.LimitedUsersCount = len(metrics.EligibleUsers)
+	m.prevIOTime = time.Now()
+
+	// Pulisci prevIOBytes per utenti non più attivi
+	for uid := range m.prevIOBytes {
+		if _, exists := allUserMetrics[uid]; !exists {
+			delete(m.prevIOBytes, uid)
 		}
 	}
 
@@ -667,6 +700,7 @@ func (m *Manager) executeDecision(decision string, metrics *SystemMetrics) error
 }
 
 // releaseIdleUsers rilascia gli utenti che non stanno usando CPU mentre i limiti sono attivi
+// e riaggiunge utenti che hanno superato la soglia di idle dopo essere stati rilasciati.
 func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 	cfg := m.GetConfig()
 	if !m.limitsActive {
@@ -678,6 +712,7 @@ func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 
 	m.mu.Lock()
 	usersToRelease := make([]int, 0)
+	usersToAdd := make([]int, 0) // utenti da riaggiungere (erano stati rilasciati ma sono tornati attivi)
 
 	for uid := range m.activeUsers {
 		// Controlla se l'utente è ancora attivo (ha processi in esecuzione)
@@ -696,57 +731,106 @@ func (m *Manager) releaseIdleUsers(metrics *SystemMetrics) error {
 		}
 	}
 
-	// Rimuovi utenti dalla mappa
+	// Controlla se ci sono utenti eligible (passano i filtri config) che sono
+	// sopra la soglia di idle ma non sono in activeUsers (erano stati rilasciati
+	// in precedenza da releaseIdleUsers). Devono essere riaggiunti.
+	for _, uid := range metrics.EligibleUsers {
+		if _, active := m.activeUsers[uid]; active {
+			continue
+		}
+		if cpuUsage, ok := metrics.UserCPUUsage[uid]; ok && cpuUsage >= idleThreshold {
+			usersToAdd = append(usersToAdd, uid)
+		}
+	}
+
+	// Rimuovi utenti dalla mappa e pulisci PSI/boost
 	for _, uid := range usersToRelease {
 		delete(m.activeUsers, uid)
+		delete(m.psiBoostedAt, uid)
+		if m.psiWatcher != nil {
+			m.psiWatcher.RemoveMonitor(uid, "cpu")
+			m.psiWatcher.RemoveMonitor(uid, "io")
+		}
+		// Ripristina il limite normale nel cgroup
+		go func(uid int) {
+			if err := m.cgroupManager.ApplyCPULimit(uid, cfg.CPUQuotaNormal); err != nil {
+				m.logger.Warn("Failed to restore normal CPU limit for idle user",
+					"uid", uid, "error", err)
+			}
+		}(uid)
 	}
 
 	remainingLimited := len(m.activeUsers)
 	m.mu.Unlock()
 
-	if len(usersToRelease) == 0 {
-		return nil // Nessun utente da rilasciare
-	}
-
-	m.logger.Info("Releasing idle users from CPU limits",
-		"users_released", len(usersToRelease),
-		"users_still_limited", remainingLimited,
-		"idle_threshold", idleThreshold,
-	)
-
-	var firstError error
-	releasedCount := 0
-
-	// Rilascia ogni utente inattivo
-	for _, uid := range usersToRelease {
-		// Ripristina il limite normale
-		if err := m.cgroupManager.ApplyCPULimit(uid, cfg.CPUQuotaNormal); err != nil {
-			m.logger.Error("Failed to restore normal CPU limit for idle user",
-				"uid", uid,
-				"quota", cfg.CPUQuotaNormal,
-				"error", err,
-			)
-			if firstError == nil {
-				firstError = err
-			}
-			continue
-		}
-
-		releasedCount++
-		m.logger.Debug("CPU limit removed for idle user",
-			"uid", uid,
-			"quota", cfg.CPUQuotaNormal,
+	// Log rilascio
+	if len(usersToRelease) > 0 {
+		m.logger.Info("Releasing idle users from CPU limits",
+			"users_released", len(usersToRelease),
+			"users_still_limited", remainingLimited,
+			"idle_threshold", idleThreshold,
 		)
 	}
 
-	// Logga il risultato
-	m.logger.Info("Idle user release completed",
-		"released", releasedCount,
-		"remaining_limited", remainingLimited,
-		"quota_restored", cfg.CPUQuotaNormal,
-	)
+	// Applica i limiti per gli utenti riaggiunti (dopo aver rilasciato il lock)
+	// activeUsers[uid] viene marcato solo dopo che CreateUserSubCgroup ha successo
+	if len(usersToAdd) > 0 && m.sharedCgroupPath != "" {
+		var added []int
+		for _, uid := range usersToAdd {
+			username := m.metricsCollector.GetUsernameFromUID(uid)
+			m.logger.Info("Re-adding user to shared cgroup (CPU usage recovered)",
+				"uid", uid, "username", username,
+				"cpu", metrics.UserCPUUsage[uid],
+			)
 
-	return firstError
+			userCgroupPath, err := m.cgroupManager.CreateUserSubCgroup(uid, m.sharedCgroupPath)
+			if err != nil {
+				m.logger.Warn("Failed to re-create user sub-cgroup",
+					"uid", uid, "error", err)
+				continue
+			}
+
+			m.wg.Add(1)
+			go func(uid int) {
+				defer m.wg.Done()
+				time.Sleep(300 * time.Millisecond)
+				if err := m.cgroupManager.MoveAllUserProcessesToSharedCgroup(uid, m.sharedCgroupPath); err != nil {
+					m.logger.Warn("Failed to move processes for re-added user",
+						"uid", uid, "error", err)
+				}
+				if err := m.cgroupManager.ApplyCPUWeight(uid, 100); err != nil {
+					m.logger.Warn("Failed to set CPU weight for re-added user",
+						"uid", uid, "weight", 100, "error", err)
+				}
+			}(uid)
+
+			if m.psiWatcher != nil {
+				cpuPressurePath := filepath.Join(userCgroupPath, "cpu.pressure")
+				ioPressurePath := filepath.Join(userCgroupPath, "io.pressure")
+				m.psiWatcher.AddMonitor(uid, "cpu", cpuPressurePath)
+				m.psiWatcher.AddMonitor(uid, "io", ioPressurePath)
+			}
+
+			added = append(added, uid)
+		}
+
+		// Only mark users as active after successful cgroup creation
+		if len(added) > 0 {
+			m.mu.Lock()
+			for _, uid := range added {
+				m.activeUsers[uid] = true
+			}
+			m.limitsAppliedTime = time.Now()
+			remainingLimited = len(m.activeUsers)
+			m.mu.Unlock()
+		}
+	}
+
+	if len(usersToRelease) == 0 && len(usersToAdd) == 0 {
+		return nil
+	}
+
+	return nil
 }
 
 // activateLimits attiva i limiti di CPU per gli utenti attivi usando pesi proporzionali.
@@ -824,23 +908,12 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 	}
 
 	// Fase 3: Configura i sottocgroup per gli utenti attuali
-	// CORREZIONE: Itera solo sugli utenti che possono essere limitati
-	for uid := range metrics.UserCPUUsage {
-		// Use real username from collector (supports LDAP/NIS with CGO)
+	// Usa EligibleUsers dal SystemMetrics (già filtrati da config al momento della raccolta)
+	// Filter chain: EligibleUsers = USER_INCLUDE_LIST + USER_EXCLUDE_LIST (gatekeeper)
+	//   → shouldApplyRAMLimits = RAM_USER_INCLUDE_LIST + RAM_USER_EXCLUDE_LIST (sub-filter)
+	//   → shouldApplyIOLimits  = IO_USER_INCLUDE_LIST  + IO_USER_EXCLUDE_LIST  (sub-filter)
+	for _, uid := range metrics.EligibleUsers {
 		username := m.metricsCollector.GetUsernameFromUID(uid)
-
-		// Salta utenti che non possono essere limitati
-		// Un utente può essere limitato se: è incluso (se include list configurata) E non è escluso
-		if !cfg.IsUserIncluded(username) || cfg.IsUserExcluded(username) {
-			m.logger.Debug("Skipping user - not in include list or in exclude list",
-				"uid", uid,
-				"username", username,
-				"is_included", cfg.IsUserIncluded(username),
-				"is_excluded", cfg.IsUserExcluded(username),
-			)
-			continue
-		}
-
 		userStr := fmt.Sprintf("%s(%d)", username, uid)
 		// Verifica se l'utente è già limitato
 		m.mu.RLock()
@@ -849,7 +922,7 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 
 		if !alreadyLimited {
 			// Crea il sottocgroup per l'utente dentro il cgroup condiviso
-			_, err := m.cgroupManager.CreateUserSubCgroup(uid, m.sharedCgroupPath)
+			userCgroupPath, err := m.cgroupManager.CreateUserSubCgroup(uid, m.sharedCgroupPath)
 			if err != nil {
 				m.logger.Error("Failed to create user sub-cgroup",
 					"user", userStr,
@@ -860,6 +933,20 @@ func (m *Manager) activateLimits(metrics *SystemMetrics) error {
 					firstError = err
 				}
 				continue
+			}
+
+			// Avvia monitoraggio PSI per questo utente (adaptive boosting)
+			if m.psiWatcher != nil {
+				cpuPressurePath := filepath.Join(userCgroupPath, "cpu.pressure")
+				ioPressurePath := filepath.Join(userCgroupPath, "io.pressure")
+				if err := m.psiWatcher.AddMonitor(uid, "cpu", cpuPressurePath); err != nil {
+					m.logger.Warn("Failed to monitor user cpu.pressure",
+						"uid", uid, "path", cpuPressurePath, "error", err)
+				}
+				if err := m.psiWatcher.AddMonitor(uid, "io", ioPressurePath); err != nil {
+					m.logger.Warn("Failed to monitor user io.pressure",
+						"uid", uid, "path", ioPressurePath, "error", err)
+				}
 			}
 
 			// Imposta il peso per l'utente (uguale per tutti)
@@ -1017,12 +1104,27 @@ func (m *Manager) deactivateLimits() error {
 	m.sharedCgroupPath = ""
 	m.mu.Unlock()
 
+	// Rimuovi monitoraggi PSI per questi utenti
+	if m.psiWatcher != nil {
+		for _, uid := range usersToCleanup {
+			m.psiWatcher.RemoveMonitor(uid, "cpu")
+			m.psiWatcher.RemoveMonitor(uid, "io")
+		}
+	}
+
 	// FIX A1: Cleanup stability tracker to prevent memory leak
 	m.stabilityTracker.mu.Lock()
 	for _, uid := range usersToCleanup {
 		delete(m.stabilityTracker.underThreshold, uid)
 	}
 	m.stabilityTracker.mu.Unlock()
+
+	// Pulisci PSI boost tracker
+	m.mu.Lock()
+	for _, uid := range usersToCleanup {
+		delete(m.psiBoostedAt, uid)
+	}
+	m.mu.Unlock()
 
 	var firstError error
 	deactivatedCount := 0
@@ -1444,6 +1546,73 @@ func (m *Manager) UpdateConfig(newConfig *config.Config) {
 		"cpu_release_threshold", newConfig.CPUReleaseThreshold,
 		"cpu_threshold_duration", newConfig.CPUThresholdDuration,
 	)
+}
+
+// RegisterPSIWatcher sets the PSI watcher for per-user cgroup monitoring.
+func (m *Manager) RegisterPSIWatcher(w *cgroup.PSIWatcher) {
+	m.psiWatcher = w
+}
+
+// OnUserPSIEvent handles a per-user PSI pressure event by boosting CPU weight.
+func (m *Manager) OnUserPSIEvent(event cgroup.PSIEvent) {
+	if event.UID <= 0 {
+		return
+	}
+	cfg := m.GetConfig()
+	boostWeight := cfg.GetPSIBoostWeight()
+
+	if err := m.cgroupManager.ApplyCPUWeight(event.UID, boostWeight); err != nil {
+		m.logger.Warn("Failed to boost CPU weight on PSI event",
+			"uid", event.UID, "type", event.Type,
+			"weight", boostWeight, "error", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.psiBoostedAt[event.UID] = time.Now()
+	m.mu.Unlock()
+
+	m.logger.Info("CPU weight boosted for user due to PSI pressure",
+		"uid", event.UID, "type", event.Type,
+		"psi_avg10", event.SomeAvg10, "weight", boostWeight)
+}
+
+// revertPSIBoosts reverts CPU weight for users whose boost duration has expired.
+func (m *Manager) revertPSIBoosts() {
+	cfg := m.GetConfig()
+	duration := time.Duration(cfg.GetPSIBoostDuration()) * time.Second
+	now := time.Now()
+
+	// Collect expired UIDs under lock, do cgroup IO outside lock
+	m.mu.Lock()
+	var expired []int
+	for uid, boostedAt := range m.psiBoostedAt {
+		if now.Sub(boostedAt) >= duration {
+			expired = append(expired, uid)
+		}
+	}
+	m.mu.Unlock()
+
+	if len(expired) == 0 {
+		return
+	}
+
+	for _, uid := range expired {
+		if err := m.cgroupManager.ApplyCPUWeight(uid, 100); err != nil {
+			m.logger.Warn("Failed to revert CPU weight after PSI boost",
+				"uid", uid, "error", err)
+			continue
+		}
+		m.logger.Debug("CPU weight reverted to normal after PSI boost expired",
+			"uid", uid, "boost_duration_s", cfg.GetPSIBoostDuration())
+	}
+
+	// Clean up expired entries
+	m.mu.Lock()
+	for _, uid := range expired {
+		delete(m.psiBoostedAt, uid)
+	}
+	m.mu.Unlock()
 }
 
 // GetConfig returns the current configuration

@@ -332,25 +332,30 @@ func main() {
 	var psiWatcher *cgroup.PSIWatcher
 	var psiEvents <-chan cgroup.PSIEvent
 	if cfg.GetPSIEventDriven() {
-		psiWatcher = cgroup.NewPSIWatcher(cfg.CgroupRoot, uint64(cfg.GetPSIWindowUs()))
+		psiWatcher = cgroup.NewPSIWatcher(uint64(cfg.GetPSIWindowUs()))
 		psiWatcher.SetThreshold("cpu", uint64(cfg.GetPSICPUStallThreshold()))
 		psiWatcher.SetThreshold("io", uint64(cfg.GetPSIOStallThreshold()))
 		if err := psiWatcher.Start(); err != nil {
 			logger.Warn("Failed to start PSI watcher, falling back to polling", "error", err)
 			psiWatcher = nil
 		} else {
+			// Monitor system-level pressure files
+			sysCPUPressure := cfg.CgroupRoot + "/cpu.pressure"
+			sysIOPressure := cfg.CgroupRoot + "/io.pressure"
+			if err := psiWatcher.AddMonitor(0, "cpu", sysCPUPressure); err != nil {
+				logger.Warn("Failed to monitor system cpu.pressure", "error", err)
+			}
+			if err := psiWatcher.AddMonitor(0, "io", sysIOPressure); err != nil {
+				logger.Warn("Failed to monitor system io.pressure", "error", err)
+			}
 			psiEvents = psiWatcher.Events()
-			psiFallback := cfg.GetPSIFallbackInterval()
+			stateManager.RegisterPSIWatcher(psiWatcher)
 			logger.Info("PSI event-driven mode enabled",
 				"cpu_threshold_us", cfg.GetPSICPUStallThreshold(),
 				"io_threshold_us", cfg.GetPSIOStallThreshold(),
 				"window_us", cfg.GetPSIWindowUs(),
-				"fallback_interval_s", psiFallback,
+				"note", "PSI events trigger user CPU weight boosts and extra control cycles",
 			)
-			// In event-driven mode il ticker serve come heartbeat di fallback
-			if psiFallback > 0 {
-				pollingInterval = psiFallback
-			}
 		}
 	}
 
@@ -420,12 +425,6 @@ func main() {
 			return
 
 		case <-ticker.C:
-			// In event-driven mode il ticker serve solo come heartbeat
-			if psiWatcher != nil {
-				logger.Debug("PSI heartbeat tick")
-				continue
-			}
-
 			currentPollingInterval := stateManager.GetConfig().GetPollingInterval()
 			if currentPollingInterval != pollingInterval {
 				ticker.Stop()
@@ -473,10 +472,16 @@ func main() {
 			if !ok {
 				continue
 			}
-			logger.Debug("PSI event received, triggering control cycle",
+			logger.Debug("PSI event received",
 				"type", psiEvent.Type,
+				"uid", psiEvent.UID,
 				"some_avg10", psiEvent.SomeAvg10,
 			)
+
+			if psiEvent.UID > 0 {
+				// Per-user PSI event: apply adaptive weight boost
+				stateManager.OnUserPSIEvent(psiEvent)
+			}
 
 			// Backpressure: Skip if previous cycle still running
 			select {
