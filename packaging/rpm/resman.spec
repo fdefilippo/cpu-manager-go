@@ -131,6 +131,7 @@ install -m 644 config/resman.conf.example %{buildroot}/%{_sysconfdir}/resman.con
 
 # Installa service systemd
 install -m 644 packaging/systemd/resman.service %{buildroot}/%{_unitdir}/
+install -m 644 packaging/systemd/cgroup-tweaks.service %{buildroot}/%{_unitdir}/
 
 # Installa man page
 install -m 644 %{_builddir}/%{name}-%{version}/man/resman.8.gz %{buildroot}/%{_mandir}/man8/
@@ -172,7 +173,7 @@ if [ $1 -eq 1 ]; then
     # Verifica cgroups v2
     if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
         echo "WARNING: cgroups v2 not detected. Please enable with:"
-        echo "  grubby --update-kernel=ALL --args='systemd.unified_cgroup_hierarchy=1'"
+        echo "  grubby --update-kernel=ALL --args='systemd.unified_cgroup_hierarchy=1 psi=1'"
         echo "  reboot"
     fi
 fi
@@ -196,6 +197,12 @@ if ! grep -q "+cpu" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
 fi
 if ! grep -q "+cpuset" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
     echo "+cpuset" >> /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+fi
+if ! grep -q "+io" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
+    echo "+io" >> /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+fi
+if ! grep -q "+memory" /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
+    echo "+memory" >> /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
 fi
 
 echo "Resource Manager installed successfully!"
@@ -228,6 +235,7 @@ rmdir /var/run/resman 2>/dev/null || true
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/resman.conf
 %{_unitdir}/resman.service
+%{_unitdir}/cgroup-tweaks.service
 %{_mandir}/man8/resman.8.gz
 %dir %{_sharedstatedir}/resman
 %dir /var/run/resman
